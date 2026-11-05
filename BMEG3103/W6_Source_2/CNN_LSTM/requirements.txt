@@ -1,0 +1,10 @@
+tensorflow>=2.13
+numpy<2.0 ; python_version < "3.12"
+numpy>=1.26 ; python_version >= "3.12"
+pandas
+tqdm
+matplotlib
+seaborn
+pillow
+nltk
+scikit-learn

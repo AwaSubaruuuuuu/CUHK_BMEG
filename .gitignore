@@ -1,0 +1,54 @@
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+.ipynb_checkpoints/
+
+# ===== 模型权重 / 数据（体积大，不进 Git）=====
+*.h5
+*.hdf5
+*.keras
+*.ckpt
+*.pt
+*.pth
+*.onnx
+*.pkl
+*.pickle
+*.mat
+*.npz
+*.npy
+*.csv
+*.xlsx
+
+# ===== 媒体 / 大文件 =====
+*.zip
+*.tar
+*.gz
+*.7z
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.mp4
+*.avi
+
+# ===== 编辑器 / 系统 =====
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+.Trash-*/
+
+# ===== 备份副本（改用 git 分支/提交代替手工副本）=====
+*副本*
+*- 副本.*
+*~*
+
+# ===== 日志 / 临时输出 =====
+*.log
+*.tmp
+*.out

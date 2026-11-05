@@ -1,0 +1,8 @@
+services:
+  bmeg:
+    build: .
+    ports:
+      - "8888:8888"        # Jupyter
+    volumes:
+      - .:/app             # 代码和数据挂载进去，容器删了文件还在
+    shm_size: "4gb"        # 跑深度学习实验时共享内存给大一点
