@@ -18,7 +18,6 @@ CUHK_BMEG/
 ├── BMEG3103-FinalProject/        # Neuro-AI 脑波交互系统
 │   ├── arduino/                  # Arduino 固件（MindWave / TGAM 串口读取、UART 转发）
 │   ├── tools/                    # 串口调试配置（UartAssist.cfg、configure.dat）
-│   ├── attention_cnn.py          # 模型脚手架（见下方说明）
 │   ├── requirements.txt
 │   └── README.md
 ├── BMEG3330-EEG-Project/         # SSVEP BCI 赛车竞赛
@@ -60,7 +59,7 @@ pip install -r BMEG3330-EEG-Project/requirements.txt   # 只做 3330 时
 
 `arduino/` 下是采集固件：`Arduino.ino` 读取 TGAM 串口并转发，`mindwave_uart.ino` 是最小可用的 UART 读取示例。`tools/` 是配套的串口调试工具配置。
 
-> `attention_cnn.py` 目前是**教学用的 MNIST 示例脚本**（DNN + CNN 手写数字分类），不是本 project 的最终模型，只作为搭建模型的起点。它使用的 `predict_classes()` 在新版 TensorFlow 中已移除，跑通需改成 `np.argmax(model.predict(...), axis=1)`。
+> 目前仓库里**只有采集侧的代码**，模型与触发逻辑尚未实现。
 
 ## BMEG3330 — SSVEP BCI 赛车竞赛
 

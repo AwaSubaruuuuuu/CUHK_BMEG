@@ -71,22 +71,9 @@ high-alpha   34768      mid-gamma     1671
 | `arduino/mindwave_uart.ino` | 最小可用的 MindWave UART 读取示例，偏移正确，调试接线时先用它 |
 | `tools/UartAssist.cfg` | UartAssist 串口助手配置（含三帧真实抓包，可用于离线校验解析器） |
 | `tools/configure.dat` | 配套调试软件配置 |
-| `attention_cnn.py` | **模型脚手架**，见下方说明 |
 | `requirements.txt` | 本项目依赖 |
 
 > 串口调试工具本身是 `.exe`，体积大且不适合放仓库（`.gitignore` 已排除），需要时从课程资料里取。
-
-## `attention_cnn.py` 说明
-
-这个文件目前是 **MNIST 手写数字分类的教学示例**（先训练一个全连接 DNN，再训练一个 CNN，保存成 `final_DNN_model.h5` / `final_CNN_model.h5`），**不是**本项目的注意力模型。保留它是为了照它的结构改成 1D 卷积的脑波模型：
-
-- 把 `Conv2D + (28,28)` 输入换成 `Conv1D + (time_steps, channels)`
-- 输出层从 10 类 softmax 换成单神经元 + sigmoid（或回归到 0–100）
-- 脚本里用到的 `predict_classes()` 在新版 TensorFlow 已被移除，要改成：
-
-  ```python
-  pred = np.argmax(model.predict(x), axis=1)
-  ```
 
 ## 运行环境
 
@@ -95,14 +82,6 @@ python -m venv .venv
 .venv\Scripts\activate            # Windows；Linux/macOS 用 source .venv/bin/activate
 pip install -r requirements.txt
 ```
-
-想直接试跑脚手架：
-
-```bash
-python attention_cnn.py           # 首次运行会自动下载 MNIST，并生成两个 .h5
-```
-
-训练产物（`*.h5`）已在 `.gitignore` 中，不会误提交。
 
 ## 硬件接线要点
 

@@ -8,17 +8,12 @@
 - **BMEG3103 Final Project**：注意力模型要的是实时脑波流，由 Arduino + MindWave/TGAM 现场采集，没有固定数据集。
 - **BMEG3330 EEG Project**：要的是 OpenBCI Ganglion 的实时 EEG 流，也没有固定数据集。
 
-唯一会用到公开数据集的是 `BMEG3103-FinalProject/attention_cnn.py`（复现用的 MNIST 脚手架），
-它由 `keras.datasets.mnist` 首次运行时自动下载到 `~/.keras/datasets/`，约 11 MB，**不用手动准备**。
-
 ---
 
 ## 一、训练产物（本地生成，不进仓库）
 
 | 文件 | 大小 | 产生方式 | 位置 |
 | --- | --- | --- | --- |
-| `final_DNN_model.h5` | 约 7 MB | `python attention_cnn.py` 训练完成后保存 | `BMEG3103-FinalProject/` |
-| `final_CNN_model.h5` | 约 5 MB | 同上 | `BMEG3103-FinalProject/` |
 | `*.h5` / `*.keras` / `*.ckpt` | 不定 | 自己训练脑波模型时产生 | 项目目录下 |
 
 这些都是可以随时重新生成的产物，已经全部被 `.gitignore` 排除，**不要提交**。
