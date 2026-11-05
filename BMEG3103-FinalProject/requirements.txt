@@ -1,0 +1,21 @@
+# BMEG3103 Final Project — 依赖
+#
+#   python -m venv .venv
+#   .venv\Scripts\activate          # Windows；Linux/macOS 用 source .venv/bin/activate
+#   pip install -r requirements.txt
+#
+# 推荐 Python 3.10 - 3.12。Windows 上 pip 装到的是 CPU 版 TensorFlow；
+# 有 NVIDIA 显卡要 GPU 训练时，另按官方说明装 CUDA 版。
+
+# ---------- 深度学习 ----------
+tensorflow>=2.16,<2.18
+
+# ---------- 数据处理与绘图 ----------
+numpy>=1.26,<2.2
+scipy>=1.11,<1.15
+pandas>=2.0,<2.3
+matplotlib>=3.7,<3.10
+
+# ---------- 串口读取脑波数据（可选）----------
+# 用 pyserial 直接从 TGAM 模块读数（不经 Arduino）时才需要：
+#   pip install pyserial>=3.5

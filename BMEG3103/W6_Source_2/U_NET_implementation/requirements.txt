@@ -1,9 +1,0 @@
-# Minimal set of packages tested against the provided scripts.
-# Tested with Python 3.10 / 3.11 on Windows; should also work on Linux/macOS.
-tensorflow>=2.10,<3.0
-numpy>=1.23,<2.0            # 2.x works too; pin if you hit scikit-image issues
-scikit-image>=0.20
-scikit-learn>=1.1
-matplotlib>=3.5
-Pillow>=9.0
-ipython>=8.0                 # only needed if students open the .ipynb originals

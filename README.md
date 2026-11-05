@@ -1,78 +1,88 @@
 # CUHK_BMEG
 
-CUHK 生物医学工程相关课程的**代码文件**归档仓库。
+CUHK 生物医学工程课程 **project 代码仓库**。
 
-本仓库只保存可版本控制的源码与笔记（`.py` / `.ipynb` / `.m` / `.md` / Docker 配置等），
-不包含模型权重、数据集、虚拟环境等大体积产物——这些由 `.gitignore` 排除。
+本仓库只放两个课程的 project 实现和运行环境（代码 + 依赖说明），**不放课程学习资料、数据集、模型权重与虚拟环境**——这些由 `.gitignore` 排除，保存在本地。
 
-## 快速上手
+| 课程 | Project | 目录 |
+| --- | --- | --- |
+| BMEG3103 Big Data in HealthCare | Neuro-AI 脑波交互系统（单通道 EEG 注意力检测） | [`BMEG3103-FinalProject/`](BMEG3103-FinalProject/) |
+| BMEG3330 Neuroengineering | SSVEP BCI 赛车 / 迷宫控制 | [`BMEG3330-EEG-Project/`](BMEG3330-EEG-Project/) |
 
-本仓库**不需要 Docker**，用本地 Python 虚拟环境即可。推荐 Python **3.10 – 3.12**。
+> 两个 project 目前都处于**准备阶段**，尚未提交正式实现。
+
+## 目录结构
+
+```
+CUHK_BMEG/
+├── BMEG3103-FinalProject/        # Neuro-AI 脑波交互系统
+│   ├── arduino/                  # Arduino 固件（MindWave / TGAM 串口读取、UART 转发）
+│   ├── tools/                    # 串口调试配置（UartAssist.cfg、configure.dat）
+│   ├── attention_cnn.py          # 模型脚手架（见下方说明）
+│   ├── requirements.txt
+│   └── README.md
+├── BMEG3330-EEG-Project/         # SSVEP BCI 赛车竞赛
+│   ├── cca_maze.py               # 迷宫版主程序（含运行时调参）
+│   ├── virtual_control.py        # 无迷宫的虚格动画版
+│   ├── requirements.txt
+│   └── README.md
+├── data/README.md                # 本地数据与模型权重的放置约定（内容不进 Git）
+├── requirements.txt              # 仓库级公共依赖
+└── .gitignore
+```
+
+## 环境搭建
+
+不需要 Docker，用本地 Python 虚拟环境即可，推荐 **Python 3.10 – 3.12**。
 
 ```bash
 git clone https://github.com/AwaSubaruuuuuu/CUHK_BMEG.git
 cd CUHK_BMEG
 
 python -m venv .venv
-.venv\Scripts\activate          # Windows PowerShell
-# source .venv/bin/activate     # Linux / macOS
+.venv\Scripts\activate            # Windows
+# source .venv/bin/activate       # Linux / macOS
 
-pip install -r requirements.txt
-jupyter lab                     # 打开对应课程的 .ipynb
+pip install -r requirements.txt                        # 公共依赖
+pip install -r BMEG3330-EEG-Project/requirements.txt   # 只做 3330 时
 ```
 
-之后更新代码只需要：
+更新代码只需要 `git pull`；依赖没变就不用重装。
 
-```bash
-git pull
-pip install -r requirements.txt   # 仅当依赖有变化时
-```
+## BMEG3103 — Neuro-AI 脑波交互系统
 
-- 所有依赖见 [`requirements.txt`](requirements.txt)；`pygame`、`brainflow`、`MindSpore` 属于可选项，按需单独安装。
-- 数据集与模型权重不进仓库，需要的文件及其放置位置见 [`data/README.md`](data/README.md)。
-- 大多数示例（MNIST、Reuters、Flickr8k）首次运行会自动下载数据，无需手动准备。
-- `BMEG3103/Dockerfile`、`compose.yaml` 是课程最初的环境容器配置，**可选**，不安装 Docker 也能正常使用。
+用单通道 EEG 做**实时注意力检测**，注意力分数越高说明越专注；分数低时不动作，持续专注时触发动作。
 
-## 目录结构
+- 注意力分数范围 **0 – 100**
+- 基线用 **3 秒移动平均**，分数**连续 2 秒 > 75** 才判定为触发
+- 模型：**1D CNN，约 3000 参数**，输入最近 **8 秒**的脑波数据，留出测试集准确率目标 **≥ 85%**
+- 硬件链路：MindWave / TGAM 脑波模块 → Arduino（UART）→ 笔记本 / 树莓派 / Jetson Nano
 
-```
-CUHK_BMEG/
-├── BMEG3103/       # 机器学习 / 深度学习课程代码
-├── BMEG3330/       # 循证医学相关：CCA 迷宫、控制与 MATLAB 实验
-├── data/README.md  # 数据集与模型权重的来源、体积、放置位置
-└── requirements.txt
-```
+`arduino/` 下是采集固件：`Arduino.ino` 读取 TGAM 串口并转发，`mindwave_uart.ino` 是最小可用的 UART 读取示例。`tools/` 是配套的串口调试工具配置。
 
-### BMEG3103
+> `attention_cnn.py` 目前是**教学用的 MNIST 示例脚本**（DNN + CNN 手写数字分类），不是本 project 的最终模型，只作为搭建模型的起点。它使用的 `predict_classes()` 在新版 TensorFlow 中已移除，跑通需改成 `np.argmax(model.predict(...), axis=1)`。
 
-| 目录 | 内容 |
+## BMEG3330 — SSVEP BCI 赛车竞赛
+
+用 **SSVEP**（稳态视觉诱发电位）把「盯着哪个闪烁方块」解码成「往哪个方向走」。
+
+- 4 个目标频率 **8 / 11 / 13 / 15 Hz**，分别映射 **上 / 下 / 左 / 右**
+- 解码：**FBCCA**（滤波器组典型相关分析），三个子带权重 `[1.0, 0.42, 0.25]`
+  - 带通 `[6–45]` / `[14–45]` / `[22–45]` Hz，4 阶 Butterworth
+- 采样率 `FS = 200` Hz（须与 OpenBCI Ganglion 一致），窗口 `WIN_TIME = 3.0` s，滑动步长 `SLIDE_STEP = 0.2` s
+- 判定阈值 `THRESHOLD = 0.135`，连续 `BUFFER_SIZE = 2` 帧一致才真正移动
+- 采集板 OpenBCI Ganglion，`SERIAL_PORT = "COM6"`（按自己电脑改）
+
+| 文件 | 说明 |
 | --- | --- |
-| `10.13_Class_source/` | LSTM 示例（`lstm1.py`, `lstm2.py`, `Test.ipynb`） |
-| `W2_Source_1/CNNText/` | 一维 CNN 文本分类 |
-| `W2_Source_1/SVM/` | SVM 示例 |
-| `W2_Source_2/` | KMeans、肘部法、随机森林 |
-| `W2_Source_3/` | 高斯贝叶斯、KNN、逻辑回归、SVM、随机森林 |
-| `W2_Source_4/` | 梯度下降 |
-| `W6_Source_1/` | TensorFlow：特征工程、数据增强、函数式 API、迁移学习 |
-| `W6_Source_2/CNN_LSTM/` | CNN-LSTM 完整实现（数据下载 / 训练 / 预测） |
-| `W6_Source_2/U_NET_implementation/` | U-Net 图像分割完整实现 |
-| `Dockerfile`, `compose.yaml` | 课程环境容器配置（可选，本地 venv 即可替代） |
+| `cca_maze.py` | 迷宫版。运行时可用 `[` / `]` 调窗口长度（0.5–5.0 s，步长 0.5），`-` / `=` 调阈值（步长 0.005），现场调参不用改代码 |
+| `virtual_control.py` | 简化版，没有迷宫，只有四方向闪烁方块和移动方块，适合先验证解码链路 |
 
-### BMEG3330
-
-| 文件 | 内容 |
-| --- | --- |
-| `CCA_maze_0723_bigger.py` | CCA 迷宫仿真主程序 |
-| `Virtual_control_CCA.py` | 虚拟控制实验 |
-| `MATLAB/` | EMD、滤波器设计、回归演示脚本 |
+两个脚本都需要真实硬件（OpenBCI Ganglion + `brainflow` + `pygame`），没有设备时无法运行。
 
 ## 使用约定
 
-- 提交前 `git status` 检查，确认没有误加 `.h5`、`.venv`、数据文件
-- 不要手工复制 `xxx - 副本.py`；用分支或提交记录代替
-- 提交信息建议格式：`BMEG3103: 简述改动`
-
-## 说明
-
-本仓库是从 `D:\Learning\BMEG3103`、`D:\Learning\BMEG3330` 中抽取代码建立的分类归档，
-原始目录中的数据集、模型权重、虚拟环境仍保留在原处。
+- 提交前 `git status` 检查，确认没有误加 `.h5` / `.csv` / `.venv` / 课程 PDF
+- 不要手工复制 `xxx - 副本.py`，用分支或提交记录代替
+- 提交信息建议格式：`BMEG3103: 简述改动` / `BMEG3330: 简述改动`
+- 课程讲义、数据集版权归课程与老师，不放进仓库

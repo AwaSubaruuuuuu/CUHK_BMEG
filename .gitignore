@@ -7,7 +7,7 @@ venv/
 env/
 .ipynb_checkpoints/
 
-# ===== 模型权重 / 数据（体积大，不进 Git）=====
+# ===== 模型权重 / 数据集（体积大，不进 Git）=====
 *.h5
 *.hdf5
 *.keras
@@ -22,18 +22,23 @@ env/
 *.npy
 *.csv
 *.xlsx
-
-# ===== 媒体 / 大文件 =====
 *.zip
 *.tar
 *.gz
 *.7z
-*.png
+data/
+models/
+
+# ===== 二进制 / 课程资料（版权归课程老师，不公开分发）=====
+*.exe
+*.pdf
+*.docx
+*.doc
+*.ppt
+*.pptx
 *.jpg
 *.jpeg
-*.gif
 *.mp4
-*.avi
 
 # ===== 编辑器 / 系统 =====
 .vscode/
