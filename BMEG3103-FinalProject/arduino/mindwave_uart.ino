@@ -57,10 +57,11 @@ void read_serial_data()
           {    
             signalquality = 0;//信号质量变量
             attention = 0;    //注意力值变量
-            //赋值数据
-            signalquality = payloadData[1];//信号值      
+            meditation = 0;   //放松度值变量
+            //赋值数据（偏移已按 TGAM 大包格式核对修正）
+            signalquality = payloadData[3];//信号质量，0-200，越大越差
             attention = payloadData[29];//注意力值
-            meditation = payloadData[31];//放松度值
+            meditation = payloadData[30];//放松度值（原写成 [31]，那是保留位）
             #if !DEBUGOUTPUT         
             //打印信号质量
             Serial.print("SignalQuality: ");

@@ -1,127 +1,124 @@
 /*
- 通过UART串口显示信号值、注意力及放松度的值
+  TGAM / MindWave 大包解析与转发
+  ---------------------------------------------------------------
+  每收到一个 38 字节大包，在串口打印 9 个逗号分隔的字段：
+
+    signal,attention,meditation,delta,theta,low_alpha,high_alpha,low_beta,high_beta
+
+  字节布局来自对 tools/UartAssist.cfg 里三帧真实抓包的逐字节核对：
+    [0] raw 低      [1] raw 高      [2] 保留(0x83)
+    [3] 信号质量    [4..27] 8 段功率，每段 3 字节大端
+    [28] 保留(0x04) [29] 注意力     [30] 放松度   [31] 保留
+
+  注意：Arduino 的串口和 TGAM 模块共用了硬件串口，所以这里的
+  Serial 既是"读 TGAM"又是"写电脑"。重烧固件前必须拔掉 TGAM 的 TXD，
+  否则上传会被脑波数据打断（avrdude: stk500_recv(): programmer is not responding）。
+  更稳妥的做法是把 TGAM 接到软串口，见 README。
  */
+
 #define BAUDRATE 57600
 #define DEBUGOUTPUT 0
 
-//校验相关变量
-int   generatedChecksum = 0;
-byte  checksum = 0; 
+// 校验相关变量
+int  generatedChecksum = 0;
+byte checksum = 0;
 
-//接收数据长度和数据数组
-byte  payloadLength = 0;
-byte  payloadData[32] = {0};//总共接收32个自己的数据
+// 接收数据长度和数据数组
+byte payloadLength = 0;
+byte payloadData[32] = {0};
 
-//需要读取的信息变量
-byte signalquality = 0;//信号质量
-byte attention = 0;    //注意力值
-byte meditation = 0;   //放松度值
+// 需要读取的信息变量
+byte signalquality = 0;  // 信号质量 0-200，越大越差，0 表示接触良好
+byte attention = 0;      // 注意力 0-100
+byte meditation = 0;     // 放松度 0-100
 
-long feature[9] = {0};
-int feature_len = 9;
+// 8 段 eeg_power 累加和，和 TGAM 的 eegPower 总和对照可校验解析是否正确
+unsigned long eegPowerSum = 0;
 
-//初始化
-void setup() 
+void setup()
 {
     Serial.begin(BAUDRATE);
-    Serial.setTimeout(1);  // Decrease Serial timeout
+    Serial.setTimeout(1);           // 降低阻塞式读取的超时
+    Serial.println("field,signal,attention,meditation,delta,theta,low_alpha,high_alpha,low_beta,high_beta");
 }
 
-//从串口读取一个字节数据
-byte ReadOneByte() 
+// 从串口读取一个字节数据
+byte ReadOneByte()
 {
-  int ByteRead;
-  while(!Serial.available());
-  ByteRead = Serial.read();
-  return ByteRead;//返回读到的字节
+    while (!Serial.available());
+    return (byte)Serial.read();
 }
 
-void passFeature(long feature[], int len)
+// 打印一行 9 个字段：signal,attention,meditation,8 段中前 6 段
+void passFeature(byte signal, byte attn, byte medi, const unsigned long power[], int n)
 {
-    // Send all features in one burst
-    for(int i = 0; i < len; i++)
+    Serial.print(signal, DEC);
+    Serial.print(',');
+    Serial.print(attn, DEC);
+    Serial.print(',');
+    Serial.print(medi, DEC);
+    for (int k = 0; k < n; k++)
     {
-        Serial.println(feature[i]);  // Using println for compatibility
+        Serial.print(',');
+        Serial.print(power[k], DEC);
     }
-    Serial.flush();  // Ensure all data is sent
+    Serial.println();
+    Serial.flush();                 // 阻塞到数据发完，避免下一个包覆盖
 }
 
-
-//读取串口数据
+// 读取串口数据
 void read_serial_data()
 {
-    //寻找数据包起始同步字节，2个
-    if(ReadOneByte() == 0xAA)//先读一个
+    // 寻找数据包起始同步字节，2 个 0xAA
+    if (ReadOneByte() == 0xAA)
     {
-      if(ReadOneByte() == 0xAA)//读第二个
-      {
-        payloadLength = ReadOneByte();//读取第三个，数据包字节的长度
-        if(payloadLength == 0x20)//如果接收到的是大包数据才继续读取，小包数据则舍弃不读取
+        if (ReadOneByte() == 0xAA)
         {
-          generatedChecksum = 0; //校验变量清0       
-          for(int i = 0; i < payloadLength; i++)//连续读取32个字节
-          {  
-            payloadData[i] = ReadOneByte();//读取指定长度数据包中的数据
-            generatedChecksum += payloadData[i];//计算数据累加和
-          }         
-          checksum = ReadOneByte();//读取校验字节  
-          //校验
-          generatedChecksum = (~generatedChecksum)&0xff;       
-          //比较校验字节
-          if(checksum == generatedChecksum)//数据接收正确，继续处理 
-          {    
-            if(payloadData[1] == 0)
+            payloadLength = ReadOneByte();
+            // 只处理大包(0x20)；小包(0x04)是单点原始波，这里丢弃
+            if (payloadLength == 0x20)
             {
-            int mod = 0;
-            int order = 0;
-            long tmp = 0;
-            #if !DEBUGOUTPUT         
-            for(int j = 4; j < 28; j++)
-            {
-              order = (j - 6) / 3;
-              mod = (j - 3) % 3 ;
-              switch (mod) 
-              {
-                case 1:
+                generatedChecksum = 0;
+                for (int i = 0; i < payloadLength; i++)
+                {
+                    payloadData[i] = ReadOneByte();
+                    generatedChecksum += payloadData[i];
+                }
+                checksum = ReadOneByte();
+                generatedChecksum = (~generatedChecksum) & 0xFF;
+                if (checksum != generatedChecksum)      // 校验失败，丢弃
+                    return;
 
-                tmp = payloadData[j] + tmp;
-               
+                // ---- 关键偏移 ----
+                signalquality = payloadData[3];         // [3] 才是信号质量
+                attention     = payloadData[29];
+                meditation    = payloadData[30];        // [30] 是放松度
 
-
-                break ;
-                case 2:
-
-                tmp = payloadData[j] * 256 + tmp;
-
-              
-
-                break; 
-                case 0:
-
-                tmp = (payloadData[j] * 65536) + tmp;
-                
-                
-                feature[order] = tmp ;
-                tmp = 0;
-                
-
-                break;
-              }
-            }  
-            feature[8] = payloadData[29];
-            passFeature(feature, feature_len);
-            
-            #endif  
-            
+#if !DEBUGOUTPUT
+                // 8 段功率：从 [4] 开始，每段 3 字节大端
+                unsigned long power[8];
+                eegPowerSum = 0;
+                for (int k = 0; k < 8; k++)
+                {
+                    int o = 4 + k * 3;
+                    power[k] = ((unsigned long)payloadData[o] << 16)
+                             | ((unsigned long)payloadData[o + 1] << 8)
+                             | ((unsigned long)payloadData[o + 2]);
+                    eegPowerSum += power[k];
+                }
+                // [28] 是保留位(实测恒为 0x04)，不是第 8 段功率；
+                // 因此这里只转发前 6 段：delta/theta/low_alpha/high_alpha/low_beta/high_beta。
+                // 让上位机额外转发到第 9 个字段，会破坏下游按固定列宽解析的假设。
+                // 下游若确实需要 low_gamma/mid_gamma，把 n 改成 8 即可，但要先改上位机解析器。
+                passFeature(signalquality, attention, meditation, power, 6);
+#endif
             }
-          } 
-        } 
-      }
+        }
     }
 }
 
-//主循环
-void loop() 
+// 主循环
+void loop()
 {
-  read_serial_data();//读取串口数据 
+    read_serial_data();
 }
