@@ -15,6 +15,7 @@
 | 文件 | 大小 | 产生方式 | 位置 |
 | --- | --- | --- | --- |
 | `*.h5` / `*.keras` / `*.ckpt` | 不定 | 自己训练脑波模型时产生 | 项目目录下 |
+| `model.json` / `model_int8.h` | ~80 KB | `python NeuroFocus/main.py --train` 生成 | `NeuroFocus/models/` |
 
 这些都是可以随时重新生成的产物，已经全部被 `.gitignore` 排除，**不要提交**。
 

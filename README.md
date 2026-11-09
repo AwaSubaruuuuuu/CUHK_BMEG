@@ -9,7 +9,7 @@ CUHK 生物医学工程课程 **project 代码仓库**。
 | BMEG3103 Big Data in HealthCare | Neuro-AI 脑波交互系统（单通道 EEG 注意力检测） | [`BMEG3103-FinalProject/`](BMEG3103-FinalProject/) |
 | BMEG3330 Neuroengineering | SSVEP BCI 赛车 / 迷宫控制 | [`BMEG3330-EEG-Project/`](BMEG3330-EEG-Project/) |
 
-> 两个 project 目前都处于**准备阶段**，尚未提交正式实现。
+> BMEG3330 仍在准备阶段；BMEG3103 已交付可运行的程序 [`BMEG3103-FinalProject/NeuroFocus/`](BMEG3103-FinalProject/NeuroFocus/)。
 
 ## 目录结构
 
@@ -18,6 +18,7 @@ CUHK_BMEG/
 ├── BMEG3103-FinalProject/        # Neuro-AI 脑波交互系统
 │   ├── arduino/                  # Arduino 固件（MindWave / TGAM 串口读取、UART 转发）
 │   ├── tools/                    # 串口调试配置（UartAssist.cfg、configure.dat）
+│   ├── NeuroFocus/               # 最终交付：单文件 GUI（采集 / 数据集 / 1-D CNN / 实时推演）
 │   ├── requirements.txt
 │   └── README.md
 ├── BMEG3330-EEG-Project/         # SSVEP BCI 赛车竞赛
@@ -59,7 +60,7 @@ pip install -r BMEG3330-EEG-Project/requirements.txt   # 只做 3330 时
 
 `arduino/` 下是采集固件：`Arduino.ino` 读取 TGAM 串口并转发，`mindwave_uart.ino` 是最小可用的 UART 读取示例。`tools/` 是配套的串口调试工具配置。
 
-> 目前仓库里**只有采集侧的代码**，模型与触发逻辑尚未实现。
+> 模型与触发逻辑已实现：`NeuroFocus/main.py` 一个文件里包含串口解析、采集与标注、数据集构建、3157 参数 1-D CNN 训练与实时推演界面（只用 numpy + pyserial）。
 
 ## BMEG3330 — SSVEP BCI 赛车竞赛
 

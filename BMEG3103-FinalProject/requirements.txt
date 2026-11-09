@@ -1,4 +1,8 @@
-# BMEG3103 Final Project — 依赖
+# BMEG3103 Final Project — 依赖（课程资料里的完整环境，可选）
+#
+# 注意：最终交付的程序 NeuroFocus 只需要 numpy + pyserial，
+#       见 NeuroFocus/requirements.txt。下面这套含 TensorFlow/pandas/scipy，
+#       只在需要做额外分析、或对照课程资料里的旧脚本时才安装。
 #
 #   python -m venv .venv
 #   .venv\Scripts\activate          # Windows；Linux/macOS 用 source .venv/bin/activate

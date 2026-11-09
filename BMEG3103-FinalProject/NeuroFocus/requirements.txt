@@ -1,0 +1,7 @@
+# NeuroFocus 运行依赖
+# 只用两个第三方包；tkinter 随 Python 官方安装包提供。
+numpy>=1.24
+pyserial>=3.5
+
+# 可选（只有需要导出 int8 TFLite 时才装，体积较大）
+# tensorflow>=2.14

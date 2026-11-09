@@ -4,6 +4,8 @@ BMEG3103 *Big Data in HealthCare* 的期末项目。
 
 用**单通道 EEG** 实时估计「注意力」，注意力高到一定程度就自动触发一个动作，注意力掉下来就停止——把脑波直接变成交互信号。
 
+> **交付物**：单文件图形界面程序 [`NeuroFocus/main.py`](NeuroFocus/main.py)，包含采集、数据集构建、3 层 1-D CNN 训练与实时推演；详见下文「NeuroFocus：交付的程序」。
+
 ## 系统设计
 
 ```
@@ -26,6 +28,11 @@ MindWave / TGAM 脑波模块（蓝牙，57600 8N1）
 - **触发规则**：以 3 秒移动平均为基线做归一化；分数**连续 2 秒 > 75** 才触发，避免单帧噪声误触
 - **模型**：1D CNN，参数量约 3K，目标是能跑在嵌入式板子上
 - **验收指标**：留出测试集（hold-out）准确率 **≥ 85%**
+
+> **实现说明（与上面的理想链路不同）**：交付版没有把 512 Hz 原始波重采样成 200 Hz 再卷积，
+> 而是直接用设备每秒的大包（attention / meditation / 8 段功率 / signal）加原始波统计量
+> 拼成 8×14 的特征窗口——因为 1 Hz 大包才是这台设备真正稳定输出的部分，
+> 512 Hz 原始流会丢包且无法与 1 Hz 标签严格对齐。取舍与验证见 `NeuroFocus/docs/报告.md` 4.2、5.1 节。
 
 ## 采到的数据长什么样（已用真实包验证）
 
@@ -93,6 +100,38 @@ high-alpha   34768      mid-gamma     1671
 
 > 这三帧的 `signal` 恒为 24、`meditation` 恒为 5，说明当时电极接触一般，抓包时并没有真正在做注意力实验。**要拿到能训练的数据，必须重新采集。**
 
+## NeuroFocus：交付的程序
+
+最终交付是一个**单文件、带图形界面**的 Python 程序 [`NeuroFocus/main.py`](NeuroFocus/main.py)，
+把「原始 EEG → 数据集 → 1-D CNN → 实时推演」整条链路装进同一个窗口。
+只依赖 **numpy + pyserial**：卷积的前向/反向、Adam、指标与全部绘图都用 NumPy 与 tkinter 手写，
+没有 TensorFlow / scikit-learn / matplotlib，任何一个数字都能在代码里逐行对上。
+
+| 页签 | 作用 |
+| --- | --- |
+| ① 设备与信号 | 串口（`COM7` @57600）或模拟器；512 Hz 原始波形、Signal 质量、Attention/Meditation 曲线 |
+| ② 采集与标注 | 6 × 60 s 协议：静息/心算交替，**全程闭眼默算「1000 − 7」**，自动打标签写 CSV，结束自动体检 |
+| ③ 数据集 | 1 Hz 特征 → 8×14 滑窗 → 伪迹剔除 → 按会话分组切分；导出 `dataset.csv` 与 HTML 报告 |
+| ④ 训练与评估 | 3 层 1-D CNN（Conv1D×3 + GAP + Dense，3157 参数）；loss 曲线、混淆矩阵、Accuracy/F1/AUC；导出 int8 C 头文件 |
+| ⑤ 实时推演 | 加载模型，实时显示 P(专注) 仪表与概率曲线（可调阈值） |
+| ⑥ 说明 / AI 使用 | 项目说明与 AI 使用声明 |
+
+```bash
+pip install -r NeuroFocus/requirements.txt         # 只有 numpy + pyserial
+python NeuroFocus/main.py                          # 图形界面
+python NeuroFocus/main.py --selftest               # 无硬件自检：协议解析 / 3157 参数梯度校验 / 端到端
+python NeuroFocus/main.py --record --port COM7 --subject S01   # 命令行采集
+python NeuroFocus/main.py --make-demo && python NeuroFocus/main.py --train   # 合成数据跑通全链路
+```
+
+**现在的数字**：合成数据 965 窗，accuracy **0.902**、F1 **0.868**、AUC **0.920**，
+混淆矩阵 `[[124, 1], [20, 69]]`；brief 的 Option A（3 s 滑窗 + 阈值 75）基线只有 0.679。
+真实数据的数字要按 `NeuroFocus/docs/采集协议.md` 重新采集后填进 `NeuroFocus/docs/报告.md` 8.3 节。
+
+方法与取舍见 [`NeuroFocus/docs/报告.md`](NeuroFocus/docs/报告.md)（数据集五步流程、模型论证、9 项挑战）、
+单页说明 [`NeuroFocus/docs/一页说明.md`](NeuroFocus/docs/一页说明.md)、
+AI 使用声明 [`NeuroFocus/docs/AI使用说明.md`](NeuroFocus/docs/AI使用说明.md)。
+
 ## 目录内容
 
 | 路径 | 说明 |
@@ -101,7 +140,11 @@ high-alpha   34768      mid-gamma     1671
 | `arduino/mindwave_uart.ino` | 最小 UART 读取示例，只打印 SignalQuality / Attention / Meditation，先用它确认链路通 |
 | `tools/UartAssist.cfg` | UartAssist 串口助手配置（含三帧真实抓包，可用于离线校验解析器） |
 | `tools/configure.dat` | 配套调试软件配置 |
-| `requirements.txt` | 本项目依赖 |
+| `requirements.txt` | 课程资料里的完整依赖（含 TensorFlow），可选；交付程序只需 `NeuroFocus/requirements.txt` |
+| `NeuroFocus/` | **最终交付**：单文件 GUI 程序、文档与无硬件自检脚本 |
+| `NeuroFocus/main.py` | 全部功能：TGAM 解析、采集与标注、数据集构建、CNN 训练、实时推演 |
+| `NeuroFocus/docs/` | 项目报告、一页说明、采集协议、AI 使用说明 |
+| `NeuroFocus/tests/` | 无硬件自动化检查（端到端、采集页、训练入口、布局） |
 
 > 串口调试工具本身是 `.exe`，体积大且不适合放仓库（`.gitignore` 已排除），需要时从课程资料里取。
 
@@ -136,7 +179,15 @@ pip install -r requirements.txt
 
 ## 进度
 
-项目处于**准备阶段**：硬件链路已通、数据格式已核对清楚，注意力模型与触发逻辑尚未实现。
+| 部分 | 状态 |
+| --- | --- |
+| 采集链路（固件 + 真实包离线校验） | 已完成 |
+| 数据集构建流程（原始 EEG → 8×14 窗口） | 已完成，`NeuroFocus/main.py` 第 ③ 页 |
+| 1-D CNN（3157 参数）+ 训练/评估 | 已完成，合成数据 accuracy 0.902 / F1 0.868 / AUC 0.920 |
+| 实时推演界面 | 已完成，`NeuroFocus/main.py` 第 ⑤ 页 |
+| 真实数据指标（brief 要求 ≥ 85%） | **待采集**，`NeuroFocus/docs/报告.md` 8.3 节留空待填 |
+
+> 现有真实会话（`NeuroFocus/data/pilot/`）是旧协议（屏幕出题 + 敲键盘）采的，体检显示两类状态的幅度差到 2.6 倍、单特征 AUC 0.99，说明眼动/手部肌电混进了标签，只作对照、不进训练。新协议见 `NeuroFocus/docs/采集协议.md`。
 
 ## 评分构成（参考）
 
