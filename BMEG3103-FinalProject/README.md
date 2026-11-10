@@ -30,9 +30,10 @@ MindWave / TGAM 脑波模块（蓝牙，57600 8N1）
 - **验收指标**：留出测试集（hold-out）准确率 **≥ 85%**
 
 > **实现说明（与上面的理想链路不同）**：交付版没有把 512 Hz 原始波重采样成 200 Hz 再卷积，
-> 而是直接用设备每秒的大包（attention / meditation / 8 段功率 / signal）加原始波统计量
-> 拼成 8×14 的特征窗口——因为 1 Hz 大包才是这台设备真正稳定输出的部分，
-> 512 Hz 原始流会丢包且无法与 1 Hz 标签严格对齐。取舍与验证见 `NeuroFocus/docs/报告.md` 4.2、5.1 节。
+> 而是直接用设备每秒的大包（attention / 8 段功率）加原始波统计量拼成 8×12 的特征窗口
+> ——因为 1 Hz 大包才是这台设备真正稳定输出的部分，512 Hz 原始流会丢包且无法与 1 Hz 标签严格对齐。
+> `meditation` 与 `signal` 两维**已从特征里删掉**（单特征 AUC 0.42 / 0.48，且 `signal` 在静息时为常数
+> 会让标准化爆掉）。取舍与验证见 `NeuroFocus/docs/报告.md` 4.2、5.1、8.4 节。
 
 ## 采到的数据长什么样（已用真实包验证）
 
@@ -102,6 +103,10 @@ high-alpha   34768      mid-gamma     1671
 
 ## NeuroFocus：交付的程序
 
+> **本分支说明**：本分支（`accuracy-fix`）是把 `main` 上的交付程序做**精度整改**后的版本。
+> `main` 另有一套「外部数据集导入 + 四种训练模式（`--cv` / `--pretrain` / `--fit-final` / `--import-external`）」
+> 的流程，本分支没有包含，两边的取舍见仓库根目录 `PATCH_NOTES.md`。
+
 最终交付是一个**单文件、带图形界面**的 Python 程序 [`NeuroFocus/main.py`](NeuroFocus/main.py)，
 把「原始 EEG → 数据集 → 1-D CNN → 实时推演」整条链路装进同一个窗口。
 只依赖 **numpy + pyserial**：卷积的前向/反向、Adam、指标与全部绘图都用 NumPy 与 tkinter 手写，
@@ -111,24 +116,26 @@ high-alpha   34768      mid-gamma     1671
 | --- | --- |
 | ① 设备与信号 | 串口（`COM7` @57600）或模拟器；512 Hz 原始波形、Signal 质量、Attention/Meditation 曲线 |
 | ② 采集与标注 | 6 × 60 s 协议：静息/心算交替，**全程闭眼默算「1000 − 7」**，自动打标签写 CSV，结束自动体检 |
-| ③ 数据集 | 1 Hz 特征 → 8×14 滑窗 → 伪迹剔除 → 按会话分组切分；导出 `dataset.csv` 与 HTML 报告 |
-| ④ 训练与评估 | 3 层 1-D CNN（Conv1D×3 + GAP + Dense，3157 参数）；loss 曲线、混淆矩阵、Accuracy/F1/AUC；导出 int8 C 头文件 |
-| ⑤ 实时推演 | 加载模型，实时显示 P(专注) 仪表与概率曲线（可调阈值） |
+| ③ 数据集 | 1 Hz 特征 → 8×12 滑窗 → 伪迹/没戴好剔除 → 按会话分组切分；导出 `dataset.csv` 与 HTML 报告 |
+| ④ 训练与评估 | 3 层 1-D CNN（Conv1D×3 + GAP + Dense，3061 参数）；按**验证集 AUC** 早停；loss 曲线、混淆矩阵、Acc/F1/AUC；同验证集上并排跑 brief 基线；导出 int8 C 头文件 |
+| ⑤ 实时推演 | 加载模型，实时显示 P(专注) 仪表与概率曲线；带 30 秒**静息校准**（换人/重戴后按本人静息重算标准化与阈值） |
 | ⑥ 说明 / AI 使用 | 项目说明与 AI 使用声明 |
 
 ```bash
 pip install -r NeuroFocus/requirements.txt         # 只有 numpy + pyserial
 python NeuroFocus/main.py                          # 图形界面
-python NeuroFocus/main.py --selftest               # 无硬件自检：协议解析 / 3157 参数梯度校验 / 端到端
+python NeuroFocus/main.py --selftest               # 无硬件自检：协议解析 / 3061 参数梯度校验 / 端到端
 python NeuroFocus/main.py --record --port COM7 --subject S01   # 命令行采集
 python NeuroFocus/main.py --make-demo && python NeuroFocus/main.py --train   # 合成数据跑通全链路
 ```
 
-**现在的数字**：合成数据 965 窗，accuracy **0.902**、F1 **0.868**、AUC **0.920**，
-混淆矩阵 `[[124, 1], [20, 69]]`；brief 的 Option A（3 s 滑窗 + 阈值 75）基线只有 0.679。
-真实数据的数字要按 `NeuroFocus/docs/采集协议.md` 重新采集后填进 `NeuroFocus/docs/报告.md` 8.3 节。
+**现在的数字**：真实数据（S01 + S02，474 个 8×12 窗口，按会话留一、阈值固定 0.5）——
+accuracy **0.890 ± 0.018**（两折 0.908 / 0.872）、F1 **0.883**、AUC **0.967**；
+brief 的 Option A（3 s 滑窗 + 阈值 75）在**同一验证集**上只有 0.616。
+（旧版本报的 0.902 / 0.868 / 0.920 是**合成数据**，且用的是会选到第 1 轮的 `val_loss` 早停，
+不要拿去和真实数据比；另有一条已修掉的 bug 曾让基线用全部数据算、虚高到 0.78。）
 
-方法与取舍见 [`NeuroFocus/docs/报告.md`](NeuroFocus/docs/报告.md)（数据集五步流程、模型论证、9 项挑战）、
+方法与取舍见 [`NeuroFocus/docs/报告.md`](NeuroFocus/docs/报告.md)（数据集五步流程、模型论证、9 项挑战、8.3 真实数据结果）、
 单页说明 [`NeuroFocus/docs/一页说明.md`](NeuroFocus/docs/一页说明.md)、
 AI 使用声明 [`NeuroFocus/docs/AI使用说明.md`](NeuroFocus/docs/AI使用说明.md)。
 
@@ -182,10 +189,10 @@ pip install -r requirements.txt
 | 部分 | 状态 |
 | --- | --- |
 | 采集链路（固件 + 真实包离线校验） | 已完成 |
-| 数据集构建流程（原始 EEG → 8×14 窗口） | 已完成，`NeuroFocus/main.py` 第 ③ 页 |
-| 1-D CNN（3157 参数）+ 训练/评估 | 已完成，合成数据 accuracy 0.902 / F1 0.868 / AUC 0.920 |
-| 实时推演界面 | 已完成，`NeuroFocus/main.py` 第 ⑤ 页 |
-| 真实数据指标（brief 要求 ≥ 85%） | **待采集**，`NeuroFocus/docs/报告.md` 8.3 节留空待填 |
+| 数据集构建流程（原始 EEG → 8×12 窗口） | 已完成，`NeuroFocus/main.py` 第 ③ 页 |
+| 1-D CNN（3061 参数）+ 训练/评估 | 已完成，真实数据两折 **0.908 / 0.872**（均值 0.890 ± 0.018），F1 0.883、AUC 0.967 |
+| 实时推演界面 | 已完成，`NeuroFocus/main.py` 第 ⑤ 页（含 30 秒静息校准） |
+| 真实数据指标（brief 要求 ≥ 85%） | **已达成**：0.890 ≥ 0.85，见 `NeuroFocus/docs/报告.md` 8.3 节；2 位被试的置信区间约 ±6–7 pt，仍需补 2 位 |
 
 > 现有真实会话（`NeuroFocus/data/pilot/`）是旧协议（屏幕出题 + 敲键盘）采的，体检显示两类状态的幅度差到 2.6 倍、单特征 AUC 0.99，说明眼动/手部肌电混进了标签，只作对照、不进训练。新协议见 `NeuroFocus/docs/采集协议.md`。
 
