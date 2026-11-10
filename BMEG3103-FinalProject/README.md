@@ -103,9 +103,10 @@ high-alpha   34768      mid-gamma     1671
 
 ## NeuroFocus：交付的程序
 
-> **本分支说明**：本分支（`accuracy-fix`）是把 `main` 上的交付程序做**精度整改**后的版本。
-> `main` 另有一套「外部数据集导入 + 四种训练模式（`--cv` / `--pretrain` / `--fit-final` / `--import-external`）」
-> 的流程，本分支没有包含，两边的取舍见仓库根目录 `PATCH_NOTES.md`。
+> **版本说明**：本目录是 `main` 上的交付版本——12 维特征 + 真实采集数据（留一会话 0.890）。
+> 仓库另有 `two-stage-14f` 分支：14 维特征 + 外部公开数据预训练 / 留一会话交叉验证 /
+> 四种训练模式（`--cv` / `--pretrain` / `--fit-final` / `--import-external`），
+> 指标来自合成数据，用来做消融与对照。两边取舍见仓库根目录 `PATCH_NOTES.md`。
 
 最终交付是一个**单文件、带图形界面**的 Python 程序 [`NeuroFocus/main.py`](NeuroFocus/main.py)，
 把「原始 EEG → 数据集 → 1-D CNN → 实时推演」整条链路装进同一个窗口。
@@ -192,7 +193,7 @@ pip install -r requirements.txt
 | 数据集构建流程（原始 EEG → 8×12 窗口） | 已完成，`NeuroFocus/main.py` 第 ③ 页 |
 | 1-D CNN（3061 参数）+ 训练/评估 | 已完成，真实数据两折 **0.908 / 0.872**（均值 0.890 ± 0.018），F1 0.883、AUC 0.967 |
 | 实时推演界面 | 已完成，`NeuroFocus/main.py` 第 ⑤ 页（含 30 秒静息校准） |
-| 真实数据指标（brief 要求 ≥ 85%） | **已达成**：0.890 ≥ 0.85，见 `NeuroFocus/docs/报告.md` 8.3 节；2 位被试的置信区间约 ±6–7 pt，仍需补 2 位 |
+| 真实数据指标（brief 要求 ≥ 85%） | **已达成**：0.890 ≥ 0.85，见 `NeuroFocus/docs/报告.md` 8.3 节；2 次会话的置信区间约 ±6–7 pt，仍需补其他被试 |
 
 > 现有真实会话（`NeuroFocus/data/pilot/`）是旧协议（屏幕出题 + 敲键盘）采的，体检显示两类状态的幅度差到 2.6 倍、单特征 AUC 0.99，说明眼动/手部肌电混进了标签，只作对照、不进训练。新协议见 `NeuroFocus/docs/采集协议.md`。
 

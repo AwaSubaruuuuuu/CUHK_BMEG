@@ -62,12 +62,13 @@ pip install -r BMEG3330-EEG-Project/requirements.txt   # 只做 3330 时
 
 > 模型与触发逻辑已实现：`NeuroFocus/main.py` 一个文件里包含串口解析、采集与标注、数据集构建、3061 参数 1-D CNN 训练与实时推演界面（只用 numpy + pyserial）。
 >
-> 真实数据（2 位被试、474 个窗口、按会话留一）**accuracy 0.890 ± 0.018、F1 0.883、AUC 0.967**，
+> 真实数据（1 位被试、2 次会话、474 个窗口，按会话留一）**accuracy 0.890 ± 0.018、F1 0.883、AUC 0.967**，
 > 已超过 brief 的 85% 要求；同一验证集上 brief 的 Option A 基线只有 0.616。详见
 > [`BMEG3103-FinalProject/README.md`](BMEG3103-FinalProject/README.md) 与 `docs/报告.md` 8.3 节。
 >
-> **当前分支 `accuracy-fix`** 是精度整改版；`main` 上另有「外部数据集导入 + 四种训练模式」的流程，
-> 本分支未包含，差异见 [`PATCH_NOTES.md`](PATCH_NOTES.md)。
+> 交付版就在 `main`：12 维特征、真实采集数据。仓库另有 `two-stage-14f` 分支，保留了另一条
+> 实现路线——14 维特征 + 公开数据预训练 / 留一会话交叉验证 / 四种训练模式，指标来自合成数据，
+> 用来做消融与对照。两条路线的取舍见 [`PATCH_NOTES.md`](PATCH_NOTES.md)。
 
 ## BMEG3330 — SSVEP BCI 赛车竞赛
 
