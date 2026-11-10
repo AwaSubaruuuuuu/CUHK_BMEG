@@ -55,12 +55,19 @@ pip install -r BMEG3330-EEG-Project/requirements.txt   # 只做 3330 时
 
 - 注意力分数范围 **0 – 100**
 - 基线用 **3 秒移动平均**，分数**连续 2 秒 > 75** 才判定为触发
-- 模型：**1D CNN，约 3000 参数**，输入最近 **8 秒**的脑波数据，留出测试集准确率目标 **≥ 85%**
+- 模型：**1D CNN，3061 参数**，输入最近 **8 秒**的脑波数据，留出测试集准确率目标 **≥ 85%**
 - 硬件链路：MindWave / TGAM 脑波模块 → Arduino（UART）→ 笔记本 / 树莓派 / Jetson Nano
 
 `arduino/` 下是采集固件：`Arduino.ino` 读取 TGAM 串口并转发，`mindwave_uart.ino` 是最小可用的 UART 读取示例。`tools/` 是配套的串口调试工具配置。
 
-> 模型与触发逻辑已实现：`NeuroFocus/main.py` 一个文件里包含串口解析、采集与标注、数据集构建、3157 参数 1-D CNN 训练与实时推演界面（只用 numpy + pyserial）。
+> 模型与触发逻辑已实现：`NeuroFocus/main.py` 一个文件里包含串口解析、采集与标注、数据集构建、3061 参数 1-D CNN 训练与实时推演界面（只用 numpy + pyserial）。
+>
+> 真实数据（2 位被试、474 个窗口、按会话留一）**accuracy 0.890 ± 0.018、F1 0.883、AUC 0.967**，
+> 已超过 brief 的 85% 要求；同一验证集上 brief 的 Option A 基线只有 0.616。详见
+> [`BMEG3103-FinalProject/README.md`](BMEG3103-FinalProject/README.md) 与 `docs/报告.md` 8.3 节。
+>
+> **当前分支 `accuracy-fix`** 是精度整改版；`main` 上另有「外部数据集导入 + 四种训练模式」的流程，
+> 本分支未包含，差异见 [`PATCH_NOTES.md`](PATCH_NOTES.md)。
 
 ## BMEG3330 — SSVEP BCI 赛车竞赛
 
