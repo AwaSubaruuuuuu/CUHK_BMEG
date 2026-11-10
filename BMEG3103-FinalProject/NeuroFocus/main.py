@@ -87,11 +87,14 @@ DATA_DIR = os.path.join(_HERE, "data")
 RAW_DIR = os.path.join(DATA_DIR, "raw")
 MODEL_DIR = os.path.join(_HERE, "models")
 DOC_DIR = os.path.join(_HERE, "docs")
-for _d in (DATA_DIR, RAW_DIR, MODEL_DIR, DOC_DIR):
+EXTERNAL_DIR = os.path.join(DATA_DIR, "external")
+for _d in (DATA_DIR, RAW_DIR, MODEL_DIR, DOC_DIR, EXTERNAL_DIR):
     os.makedirs(_d, exist_ok=True)
 
 DATASET_PATH = os.path.join(DATA_DIR, "dataset.csv")
-MODEL_PATH = os.path.join(MODEL_DIR, "model.json")
+MODEL_PATH = os.path.join(MODEL_DIR, "model.json")          # 主交付模型（外部预训练 + 主数据微调）
+MODEL_PATH_SCRATCH = os.path.join(MODEL_DIR, "model_scratch.json")   # 消融对照：只用主数据从零训练
+MODEL_PATH_PRETRAIN = os.path.join(MODEL_DIR, "pretrained_external.json")  # 中间产物：只用外部数据
 
 # 采集与建模参数
 WINDOW = 8              # 时间窗长度（秒）—— 与 Project Brief 的 "last 8 attention values" 一致
@@ -518,6 +521,53 @@ def is_raw_csv(path):
     return ("signal" in head) and ("attention" in head)
 
 
+# ---- 数据身份：来源 / 被试 / 会话 -------------------------------------------
+SOURCE_LABELS = {"self": "自采", "external": "外部", "sim": "模拟"}
+
+
+def source_of(path):
+    """判断一个会话 CSV 的来历：self=本人采集, external=公开数据集导入, sim=模拟器生成。
+
+    这条信息只用来说明数据的角色（主数据 / 预训练 / 流程演示），
+    不参与任何特征或标签，因此不会泄漏到模型里。
+    """
+    p = os.path.abspath(path).replace("\\", "/")
+    base = os.path.basename(p)
+    if "_demo_sim" in base:
+        return "sim"
+    if base.startswith("ext_") or "/external/" in p:
+        return "external"
+    return "self"
+
+
+def subject_of(path):
+    """从文件名取被试编号。外部数据文件名形如 ext_Male_1_Front_03.csv。"""
+    base = os.path.splitext(os.path.basename(path))[0]
+    if base.startswith("ext_"):
+        parts = base.split("_")
+        return parts[1] if len(parts) > 1 else "ext"
+    return base.split("_")[0]
+
+
+def keys_of(ds, by="session"):
+    """划分单位：session=每个会话文件；subject=每個被试（跨会话留出）。"""
+    if by == "subject":
+        return ds.get("subjects", ds["groups"])
+    return ds["groups"]
+
+
+def group_inventory(ds):
+    """返回 [(单位, 窗口数, 来源)]，用于在界面与日志里说明数据构成。"""
+    keys = ds["groups"]
+    srcs = ds.get("sources")
+    rows = []
+    for k in sorted(set(keys.tolist())):
+        m = keys == k
+        s = str(srcs[m][0]) if srcs is not None and m.any() else "self"
+        rows.append((k, int(m.sum()), s))
+    return rows
+
+
 def _segments(rows):
     """把连续、同标签、间隔≈1s 的行切成段，返回 [(start_idx, end_idx, label)]。"""
     segs, start = [], None
@@ -543,19 +593,29 @@ def _segments(rows):
 
 def build_dataset(paths, window=WINDOW, stride=1, settle=SETTLE_SECONDS,
                   max_signal=100, artifact_z=4.0, verbose=False):
-    """原始流 → 切段 → 丢稳定期 → 质量/伪迹过滤 → 滑窗 → 标签 → 按会话分组。"""
+    """原始流 → 切段 → 丢稳定期 → 质量/伪迹过滤 → 滑窗 → 标签 → 分组。
+
+    与旧版差异：
+      · 每个窗口同时记录 groups（会话文件名）、subjects（被试）、sources（来源）；
+      · 外部公开数据集每个试次只有 10 秒，没有佩戴稳定期可丢，自动把 settle 置 0；
+      · 伪迹阈值只用 raw_std>0 的行估计，避免外部数据（无该列）把阈值拉低。
+    """
     window, stride, settle = int(window), int(stride), int(settle)   # GUI 传进来的可能是 float
     paths = [p for p in paths if is_raw_csv(p)]
-    Xs, ys, groups, per_file = [], [], [], []
+    if not paths:
+        raise RuntimeError("没有可用的会话 CSV（*_tasks.csv 与其它 CSV 会被忽略）。")
+    Xs, ys, groups, subjects, sources, per_file = [], [], [], [], [], []
     reject = {"短段": 0, "信号差": 0, "伪迹": 0, "窗内不完整": 0}
 
     all_std = []
     for p in paths:
         for r in load_csv_rows(p)[::5]:
             try:
-                all_std.append(float(r.get("raw_std") or 0))
+                v = float(r.get("raw_std") or 0)
             except Exception:
-                pass
+                continue
+            if v > 0:
+                all_std.append(v)
     if all_std:
         arr = np.asarray(all_std)
         med = float(np.median(arr))
@@ -567,13 +627,15 @@ def build_dataset(paths, window=WINDOW, stride=1, settle=SETTLE_SECONDS,
     for p in paths:
         rows = load_csv_rows(p)
         name = os.path.basename(p)
+        src, subj = source_of(p), subject_of(p)
+        st = 0 if src == "external" else settle      # 10 s 试次没有稳定期可丢
         got = 0
         for (a, b, lab) in _segments(rows):
             seg_rows = rows[a:b]
-            if len(seg_rows) <= settle + window:
+            if len(seg_rows) <= st + window:
                 reject["短段"] += 1
                 continue
-            seg_rows = seg_rows[settle:]
+            seg_rows = seg_rows[st:]
             ok = []
             for r in seg_rows:
                 try:
@@ -597,10 +659,13 @@ def build_dataset(paths, window=WINDOW, stride=1, settle=SETTLE_SECONDS,
                 Xs.append(frame_features([row_to_sample(r) for r, _ in chunk]))
                 ys.append(lab)
                 groups.append(name)
+                subjects.append(subj)
+                sources.append(src)
                 got += 1
-        per_file.append({"file": name, "rows": len(rows), "windows": got})
+        per_file.append({"file": name, "rows": len(rows), "windows": got,
+                         "source": src, "subject": subj})
         if verbose:
-            print(f"[dataset] {name}: rows={len(rows)} windows={got}")
+            print(f"[dataset] {name}: rows={len(rows)} windows={got} source={src}")
 
     if not Xs:
         raise RuntimeError("没有生成任何窗口：请检查标签是否有效、信号质量是否合格。"
@@ -608,24 +673,72 @@ def build_dataset(paths, window=WINDOW, stride=1, settle=SETTLE_SECONDS,
     return {"X": np.stack(Xs).astype(np.float32),
             "y": np.asarray(ys, dtype=np.float32),
             "groups": np.asarray(groups),
+            "subjects": np.asarray(subjects),
+            "sources": np.asarray(sources),
             "per_file": per_file, "reject": reject, "std_thr": std_thr}
 
 
-def split_dataset(ds, val_ratio=0.2, seed=42, by_group=True):
-    """按"会话文件"分组划分，避免同一段连续数据同时进训练/验证集（防泄漏）。"""
+def split_dataset(ds, val_ratio=0.2, seed=42, by="session"):
+    """按"会话文件"（或"被试"）分组划分，避免同一段连续数据同时进训练/验证集。
+
+    by="session"：留出若干个完整会话 → 衡量"跨会话"泛化，报告里的主指标用它；
+    by="subject"：留出整个被试 → 衡量"跨被试"泛化，只在有 ≥2 个被试时可用。
+    只有一个分组时无法真正留出，会退化为随机切分——调用方必须把这一点写进报告。
+    """
+    keys = keys_of(ds, by)
+    uniq = sorted(set(keys.tolist()))
     rng = np.random.default_rng(seed)
-    groups = ds["groups"]
-    uniq = sorted(set(groups.tolist()))
-    if by_group and len(uniq) >= 2:
+    if len(uniq) >= 2:
+        uniq = list(uniq)
         rng.shuffle(uniq)
         n_val = max(1, int(round(len(uniq) * val_ratio)))
-        val_g = set(uniq[:n_val])
-        val_mask = np.array([g in val_g for g in groups])
-    else:
-        idx = rng.permutation(len(ds["y"]))
-        val_mask = np.zeros(len(idx), dtype=bool)
-        val_mask[idx[:max(1, int(len(idx) * val_ratio))]] = True
-    return ~val_mask, val_mask
+        val_k = set(uniq[:n_val])
+        va = np.array([k in val_k for k in keys])
+        if va.all() or not va.any():
+            va = np.zeros(len(keys), dtype=bool)
+            va[:max(1, len(keys) // 5)] = True
+        return ~va, va
+    idx = rng.permutation(len(ds["y"]))
+    va = np.zeros(len(idx), dtype=bool)
+    va[idx[:max(1, int(len(idx) * val_ratio))]] = True
+    return ~va, va
+
+
+def group_kfold(ds, by="session", k=8, seed=42):
+    """留一/留 k 折交叉验证：返回 [(train_mask, val_mask, 验证组列表), ...]。
+
+    每个折都完整留出若干会话（或整个被试），窗口之间不会共享 7/8 秒数据。
+    """
+    keys = keys_of(ds, by)
+    uniq = sorted(set(keys.tolist()))
+    if len(uniq) < 2:
+        raise ValueError(f"只有 {len(uniq)} 个分组（{by}），无法做交叉验证；"
+                         "请至少采集 2 个会话，推荐 8 个。")
+    k = max(2, min(int(k), len(uniq)))
+    rng = np.random.default_rng(seed)
+    uniq = list(uniq)
+    rng.shuffle(uniq)
+    folds = []
+    for i in range(k):
+        vk = set(uniq[i::k])
+        va = np.array([x in vk for x in keys])
+        tr = ~va
+        if va.sum() == 0 or tr.sum() == 0:
+            continue
+        folds.append((tr, va, sorted(vk)))
+    if not folds:
+        raise ValueError("无法构造有效的交叉验证折（某些折没有验证窗口）。")
+    return folds
+
+
+def split_note(ds, by="session"):
+    """一句话说明这次划分是否真的"留出"了整组数据。"""
+    keys = keys_of(ds, by)
+    n = len(set(keys.tolist()))
+    if n >= 2:
+        return f"按{'被试' if by == 'subject' else '会话'}留出（共 {n} 组），验证集不参与训练。"
+    return ("[警告] 只有 1 个分组，验证集是从同一段连续信号里随机抽的，"
+            "相邻窗口共享 7/8 秒数据 → 指标会明显偏乐观，不能写进结论。")
 
 
 def standardize(Xtr, Xva):
@@ -738,7 +851,7 @@ class FocusCNN:
         out = []
         for i in range(0, len(x), batch):
             z = self.forward(x[i:i + batch], cache=False)
-            out.append(1.0 / (1.0 + np.exp(-z)))
+            out.append(1.0 / (1.0 + np.exp(-np.clip(z, -30.0, 30.0))))
         return np.concatenate(out) if out else np.zeros(0)
 
     def state(self):
@@ -828,12 +941,21 @@ def cm_matrix(m):
 
 
 # ---- 训练 -------------------------------------------------------------------
-def train_cnn(Xtr, ytr, Xva, yva, epochs=300, batch=32, lr=1e-3, seed=0,
-              progress=None, stop_flag=None, augment=True):
+def train_cnn(Xtr, ytr, Xva=None, yva=None, epochs=300, batch=32, lr=1e-3, seed=0,
+              progress=None, stop_flag=None, augment=True, init_state=None):
+    """训练 1-D CNN。
+
+    init_state  给定时先把权重载入（两阶段训练里的"用外部预训练权重初始化"）。
+    Xva/yva     为 None 时不做验证（用于"在全部会话上重训最终模型"），此时不早停，
+                跑满 epochs 并保留最后一轮权重——轮数由交叉验证的最佳轮数决定。
+    """
     net = FocusCNN(Xtr.shape[-1], seed=seed)
+    if init_state is not None:
+        net.load_state(init_state)
     opt = Adam(net.params(), lr=lr, wd=1e-4)
     rng = np.random.default_rng(seed)
     hist = {"epoch": [], "train_loss": [], "val_loss": [], "val_acc": [], "val_f1": []}
+    have_val = Xva is not None and len(Xva) > 0
     best = {"state": None, "val_loss": 1e9, "epoch": -1}
     patience, bad = 60, 0
     n = len(ytr)
@@ -855,40 +977,52 @@ def train_cnn(Xtr, ytr, Xva, yva, epochs=300, batch=32, lr=1e-3, seed=0,
                 xb += rng.normal(0.0, 0.02, xb.shape).astype(np.float32)
             z = net.forward(xb)
             tot += bce_with_logits(z, ytr[b]) * len(b)
-            p = 1.0 / (1.0 + np.exp(-z))
+            p = 1.0 / (1.0 + np.exp(-np.clip(z, -30.0, 30.0)))
             net.backward(((p - ytr[b]) / len(b)).astype(np.float32))
             opt.step(net.grads())
         tr_loss = tot / n
 
-        zv = net.forward(Xva, cache=False)
-        vl = bce_with_logits(zv, yva)
-        pv = (1.0 / (1.0 + np.exp(-zv)) > 0.5).astype(np.float32)
-        acc = float((pv == yva).mean())
-        f1 = f1_score_bin(yva, pv)
+        if have_val:
+            zv = net.forward(Xva, cache=False)
+            vl = bce_with_logits(zv, yva)
+            pv = (1.0 / (1.0 + np.exp(-np.clip(zv, -30.0, 30.0))) > 0.5).astype(np.float32)
+            acc = float((pv == yva).mean())
+            f1 = f1_score_bin(yva, pv)
+        else:
+            vl, acc, f1 = float("nan"), float("nan"), float("nan")
 
         for k, v in zip(["epoch", "train_loss", "val_loss", "val_acc", "val_f1"],
                         [ep, tr_loss, vl, acc, f1]):
             hist[k].append(v)
 
-        if vl < best["val_loss"] - 1e-5:
-            best.update(val_loss=vl, epoch=ep,
-                        state={k: v.copy() for k, v in net.state().items()})
-            bad = 0
-        else:
-            bad += 1
-            if bad >= patience:
-                if progress:
-                    progress(ep, epochs, tr_loss, vl, acc, f1, "early-stop")
-                break
+        if have_val:
+            if vl < best["val_loss"] - 1e-5:
+                best.update(val_loss=vl, epoch=ep,
+                            state={k: v.copy() for k, v in net.state().items()})
+                bad = 0
+            else:
+                bad += 1
+                if bad >= patience:
+                    if progress:
+                        progress(ep, epochs, tr_loss, vl, acc, f1, "early-stop")
+                    break
         if progress and (ep == 1 or ep % 5 == 0):
-            progress(ep, epochs, tr_loss, vl, acc, f1, "")
-    if best["state"] is not None:
+            progress(ep, epochs, tr_loss, vl, acc, f1, "" if have_val else "no-val")
+    if have_val and best["state"] is not None:
         net.load_state(best["state"])
+    if not have_val:
+        best = {"state": {k: v.copy() for k, v in net.state().items()},
+                "val_loss": float("nan"), "epoch": len(hist["epoch"])}
     return net, hist, best
 
 
-def threshold_baseline(Xraw, ds_y, win=3, thr=75.0):
-    """Project Brief 的 Option A：3 秒滑动平均 + 阈值，作为 CNN 的对照。"""
+def threshold_baseline(Xraw, ds_y, win=3, thr=75.0, idx=None):
+    """Project Brief 的 Option A：3 秒滑动平均 + 阈值，作为 CNN 的对照。
+
+    idx 给定时只在指定子集上评估（应当只传验证集，否则基线也是"见过答案"的）。
+    """
+    if idx is not None:
+        Xraw, ds_y = Xraw[idx], ds_y[idx]
     att = Xraw[:, :, 0] * 100.0
     ma = np.apply_along_axis(lambda r: np.convolve(r, np.ones(win) / win, mode="valid")[-1], 1, att)
     pred = (ma > thr).astype(int)
@@ -996,39 +1130,261 @@ def make_demo_set(outdir, subjects=("S01", "S02", "S03", "S04"), blocks=6, block
 # =============================================================================
 # 7. 训练流程编排（GUI 与命令行共用）
 # =============================================================================
+def proba_of(net, X, mu, sd):
+    """标准化后用网络预测概率（mu/sd 必须来自训练集，避免分布外输入）。"""
+    return net.predict_proba((X - mu) / sd)
+
+
 def train_from_dataset(ds, epochs=300, lr=1e-3, val_ratio=0.2, seed=42,
-                       progress=None, stop_flag=None):
-    """在已经构建好的数据集上训练（GUI 的「开始训练」优先走这里，避免重复构建）。"""
-    tr, va = split_dataset(ds, val_ratio=val_ratio, seed=seed, by_group=True)
+                       progress=None, stop_flag=None, init_state=None,
+                       init_name="scratch", by="session"):
+    """在已经构建好的数据集上训练一次（GUI 的「开始训练」优先走这里，避免重复构建）。
+
+    init_state 不为 None 时用外部预训练权重初始化（阶段 2-B）；否则从零训练（阶段 2-A）。
+    """
+    tr, va = split_dataset(ds, val_ratio=val_ratio, seed=seed, by=by)
     Xtr, Xva, mu, sd = standardize(ds["X"][tr], ds["X"][va])
     net, hist, best = train_cnn(Xtr, ds["y"][tr], Xva, ds["y"][va],
                                 epochs=epochs, lr=lr, seed=seed,
-                                progress=progress, stop_flag=stop_flag)
+                                progress=progress, stop_flag=stop_flag,
+                                init_state=init_state)
     pva = net.predict_proba(Xva)
     m = evaluate(ds["y"][va], pva)
-    base_m, base_acc = threshold_baseline(ds["X"], ds["y"], win=3, thr=75.0)
+    base_m, base_acc = threshold_baseline(ds["X"], ds["y"], win=3, thr=75.0, idx=va)
     meta = {
         "trained_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "init": init_name, "split_by": by,
         "n_train": int(tr.sum()), "n_val": int(va.sum()),
         "pos_rate": float(ds["y"].mean()),
         "metrics": m, "baseline": base_m,
         "best_epoch": best["epoch"], "epochs_run": len(hist["epoch"]),
         "std_thr": ds["std_thr"], "reject": ds["reject"],
         "per_file": ds["per_file"],
-        "val_groups": sorted(set(ds["groups"][va].tolist())),
-        "train_groups": sorted(set(ds["groups"][tr].tolist())),
+        "val_groups": sorted(set(keys_of(ds, by)[va].tolist())),
+        "train_groups": sorted(set(keys_of(ds, by)[tr].tolist())),
         "n_params": int(net.n_params()),
+        "split_note": split_note(ds, by),
     }
     return {"net": net, "mu": mu, "sd": sd, "hist": hist, "metrics": m,
             "baseline": base_m, "baseline_acc": base_acc, "ds": ds, "meta": meta}
 
 
 def run_training(raw_paths, epochs=300, lr=1e-3, val_ratio=0.2, seed=42,
-                 progress=None, stop_flag=None, settle=SETTLE_SECONDS):
+                 progress=None, stop_flag=None, settle=SETTLE_SECONDS,
+                 init_state=None, init_name="scratch", by="session"):
     """从原始会话 CSV 走完整流程：构建数据集 → 训练 → 评估。"""
     ds = build_dataset(raw_paths, settle=settle)
     return train_from_dataset(ds, epochs=epochs, lr=lr, val_ratio=val_ratio,
-                              seed=seed, progress=progress, stop_flag=stop_flag)
+                              seed=seed, progress=progress, stop_flag=stop_flag,
+                              init_state=init_state, init_name=init_name, by=by)
+
+
+def cv_sessions(ds, folds=8, by="session", init_state=None, init_name="scratch",
+                epochs=300, lr=1e-3, seed=42, on_fold=None, stop_flag=None):
+    """留一会话（或留一被试）交叉验证：每折完整留出一组，给出 mean±std。
+
+    只产出指标，不保留权重——最终交付模型另用 fit_final 在全部会话上重训。
+    """
+    fl = group_kfold(ds, by=by, k=folds, seed=seed)
+    rows = []
+    for i, (tr, va, vk) in enumerate(fl):
+        if stop_flag is not None and stop_flag():
+            break
+        Xtr, Xva, mu, sd = standardize(ds["X"][tr], ds["X"][va])
+        net, hist, best = train_cnn(Xtr, ds["y"][tr], Xva, ds["y"][va], epochs=epochs,
+                                    lr=lr, seed=seed + i, stop_flag=stop_flag,
+                                    init_state=init_state)
+        m = evaluate(ds["y"][va], net.predict_proba(Xva))
+        bm, bacc = threshold_baseline(ds["X"], ds["y"], win=3, thr=75.0, idx=va)
+        row = {"fold": i + 1, "val_groups": vk, "n_train": int(tr.sum()), "n_val": int(va.sum()),
+               "acc": m["acc"], "f1": m["f1"], "auc": m["auc"],
+               "precision": m["precision"], "recall": m["recall"],
+               "baseline_acc": bacc, "best_epoch": int(best["epoch"]),
+               "epochs_run": len(hist["epoch"])}
+        rows.append(row)
+        if on_fold:
+            on_fold(row)
+    if not rows:
+        raise RuntimeError("交叉验证没有跑出任何折。")
+    agg = {}
+    for k in ("acc", "f1", "auc", "baseline_acc", "best_epoch"):
+        vals = np.asarray([r[k] for r in rows], dtype=float)
+        agg[k] = {"mean": float(vals.mean()), "std": float(vals.std(ddof=1) if len(vals) > 1 else 0.0),
+                  "min": float(vals.min()), "max": float(vals.max())}
+    return {"folds": rows, "agg": agg, "by": by, "k": len(rows),
+            "init": init_name, "req_folds": int(folds)}
+
+
+def epochs_from_cv(cv, cap=None, floor=3):
+    """最终模型训练轮数：取各折最佳轮的中位数，并至少跑 floor 轮。
+
+    单折早停可能停在很靠前的轮次（验证损失第一轮之后就不再下降），
+    直接照搬会让「全部会话」的最终模型严重欠拟合；所以设一个下限，
+    同时不超过用户给的最大轮数。
+    """
+    if not cv or not cv.get("folds"):
+        return cap
+    med = float(np.median([r["best_epoch"] for r in cv["folds"]]))
+    ep = max(int(floor), int(round(med)))
+    if cap is not None:
+        ep = min(int(cap), ep)
+    return max(1, ep)
+
+
+def fit_final(ds, init_state=None, init_name="scratch", epochs=300, lr=1e-3, seed=42,
+              progress=None, stop_flag=None):
+    """用全部会话重训最终模型（轮数取交叉验证的最佳轮数中位数）。
+
+    这里在训练集上算出来的 acc 只作"代码是否跑通"的检查，绝不能当性能写进报告。
+    """
+    mu = ds["X"].reshape(-1, ds["X"].shape[-1]).mean(axis=0)
+    sd = ds["X"].reshape(-1, ds["X"].shape[-1]).std(axis=0) + 1e-6
+    X = (ds["X"] - mu) / sd
+    net, hist, best = train_cnn(X, ds["y"], None, None, epochs=epochs, lr=lr, seed=seed,
+                                progress=progress, stop_flag=stop_flag,
+                                init_state=init_state, augment=True)
+    m = evaluate(ds["y"], net.predict_proba(X))
+    meta = {
+        "trained_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "init": init_name, "fit": "all-sessions",
+        "n_train": int(len(ds["y"])), "n_val": 0,
+        "pos_rate": float(ds["y"].mean()),
+        "metrics_train_only": m,
+        "epochs_run": len(hist["epoch"]),
+        "std_thr": ds["std_thr"], "reject": ds["reject"], "per_file": ds["per_file"],
+        "trained_on": sorted(set(ds["groups"].tolist())),
+        "n_params": int(net.n_params()),
+    }
+    return {"net": net, "mu": mu, "sd": sd, "hist": hist, "metrics": m,
+            "baseline": {}, "baseline_acc": float("nan"), "ds": ds, "meta": meta}
+
+
+def train_external(paths=None, epochs=200, lr=1e-3, folds=2, seed=42,
+                   on_fold=None, stop_flag=None, save=True, verbose=True):
+    """阶段 1：只用外部公开数据集预训练，产出可复用的初始化权重。
+
+    流程：按"被试（Male/Female）"留一交叉验证 → 取各折最佳轮数的中位数 →
+    在全部外部数据上按该轮数重训一份权重（不做早停，避免用验证数据挑轮数）。
+    """
+    if paths is None:
+        paths = sorted(p for p in glob.glob(os.path.join(EXTERNAL_DIR, "*.csv")) if is_raw_csv(p))
+    if not paths:
+        raise RuntimeError("data/external 里没有可用的外部会话。先运行 "
+                           "python main.py --import-external <zip或目录>")
+    ds = build_dataset(paths, settle=0)
+    if verbose:
+        print(f"[pretrain] 外部窗口 {len(ds['y'])} 个，被试 {sorted(set(ds['subjects'].tolist()))}，"
+              f"会话 {len(set(ds['groups'].tolist()))} 个")
+    cv = cv_sessions(ds, folds=folds, by="subject", init_name="external",
+                     epochs=epochs, lr=lr, seed=seed, on_fold=on_fold, stop_flag=stop_flag)
+    ep = epochs_from_cv(cv, cap=epochs)
+    res = fit_final(ds, init_name="external", epochs=ep, lr=lr, seed=seed, stop_flag=stop_flag)
+    res["meta"]["cv"] = {"k": cv["k"], "by": "subject",
+                         "acc_mean": cv["agg"]["acc"]["mean"], "acc_std": cv["agg"]["acc"]["std"],
+                         "f1_mean": cv["agg"]["f1"]["mean"], "f1_std": cv["agg"]["f1"]["std"],
+                         "auc_mean": cv["agg"]["auc"]["mean"], "auc_std": cv["agg"]["auc"]["std"]}
+    res["meta"]["source"] = "external"
+    res["meta"]["features_missing"] = ["raw_std", "raw_max"]
+    if save:
+        save_model(MODEL_PATH_PRETRAIN, res["net"], res["mu"], res["sd"], res["meta"])
+    return {"res": res, "cv": cv, "ds": ds, "epochs": ep}
+
+
+def load_weights(path):
+    """只取权重，用于两阶段训练的初始化。"""
+    net, mu, sd, meta = load_model(path)
+    return {k: v.copy() for k, v in net.state().items()}, meta
+
+
+# ---- 外部数据导入 ----------------------------------------------------------
+_EXT_COL = {"low_alpha": "lowAlpha", "high_alpha": "highAlpha", "low_beta": "lowBeta",
+            "high_beta": "highBeta", "low_gamma": "lowGamma", "mid_gamma": "midGamma"}
+
+
+def _ext_region(parts):
+    for p in parts:
+        q = p.lower()
+        if q in ("front", "fornt"):
+            return "Front"
+        if q in ("left", "right", "under"):
+            return q.capitalize()
+    return "NA"
+
+
+def import_external(src_path, outdir=None, verbose=True):
+    """把公开 NeuroSky 数据集（zip 或目录）转成与本地采集同构的会话 CSV。
+
+    公开数据每个试次只有 10 行（1 Hz × 10 s），缺少 raw_std / raw_max 两列，
+    这里补 0 并在 README 里写明；训练时这两维对全部样本是常数，标准化后为 0，
+    不会影响其它 12 维，但也不能指望从外部数据学到"伪迹"信息。
+    """
+    outdir = outdir or EXTERNAL_DIR
+    os.makedirs(outdir, exist_ok=True)
+    tmp = None
+    root = src_path
+    if os.path.isfile(src_path) and src_path.lower().endswith(".zip"):
+        import zipfile
+        tmp = os.path.join(outdir, "_unzip_tmp")
+        shutil.rmtree(tmp, ignore_errors=True)
+        with zipfile.ZipFile(src_path) as z:
+            z.extractall(tmp)
+        root = tmp
+    if not os.path.isdir(root):
+        raise RuntimeError(f"找不到 {src_path}（需要 zip 或已解压的目录）。")
+
+    srcs = []
+    for dirpath, _, files in os.walk(root):
+        for fn in files:
+            if fn.lower().endswith(".csv") and "_tasks" not in fn:
+                srcs.append(os.path.join(dirpath, fn))
+    srcs.sort()
+    if not srcs:
+        raise RuntimeError("目录里没有 CSV 文件。")
+
+    made, skipped = [], 0
+    for idx, p in enumerate(srcs):
+        rel = os.path.relpath(p, root).replace("\\", "/").split("/")
+        sex = "Male"
+        for part in rel:
+            if part.lower() in ("male", "female"):
+                sex = part.capitalize()
+        is_neg = any(("not" in part.lower()) for part in rel)
+        lab = 0 if is_neg else 1
+        region = _ext_region(rel)
+        try:
+            rows = load_csv_rows(p)
+        except Exception:
+            skipped += 1
+            continue
+        if not rows:
+            skipped += 1
+            continue
+        out = os.path.join(outdir, f"ext_{sex}_{lab}_{region}_{idx:03d}.csv")
+        with open(out, "w", newline="", encoding="utf-8") as f:
+            w = csv.writer(f)
+            w.writerow(["t", "label", "signal", "attention", "meditation", "raw_std", "raw_max"] + BANDS)
+            for k, r in enumerate(rows):
+                try:
+                    att = float(r.get("attention") or 0)
+                    med = float(r.get("meditation") or 0)
+                    sig = float(r.get("poor_signal") or 0)
+                except Exception:
+                    continue
+                band = []
+                for b in BANDS:
+                    key = b if b in r else next((k2 for k2, v2 in _EXT_COL.items() if v2 == b), b)
+                    try:
+                        band.append(int(float(r.get(key) or 0)))
+                    except Exception:
+                        band.append(0)
+                w.writerow([k, lab, int(sig), int(att), int(med), 0, 0] + band)
+        made.append(out)
+    if tmp:
+        shutil.rmtree(tmp, ignore_errors=True)
+    if verbose:
+        print(f"[import] 读取 {len(srcs)} 个试次 → 写出 {len(made)} 个会话 CSV（跳过 {skipped}）")
+        print(f"[import] 输出目录 {outdir}")
+    return made
 
 
 def export_dataset_csv(ds, path):
@@ -1276,6 +1632,7 @@ class App:
         self.train_msgs = queue.Queue()
         self.stop_flag = {"stop": False}
         self.raw_files = []
+        self.external_files = []
         root.title("NeuroFocus · 单通道 EEG 专注度分析（BMEG3103 Final Project）")
         root.geometry("1180x820")
         root.minsize(980, 640)
@@ -1375,8 +1732,10 @@ class App:
 
     def refresh_raw_list(self):
         self.raw_files = sorted(p for p in glob.glob(os.path.join(RAW_DIR, "*.csv")) if is_raw_csv(p))
+        self.external_files = sorted(p for p in glob.glob(os.path.join(EXTERNAL_DIR, "*.csv"))
+                                     if is_raw_csv(p))
         if hasattr(self, "tab_dataset"):
-            self.tab_dataset.reload(self.raw_files)
+            self.tab_dataset.reload(self.raw_files + self.external_files)
 
     # ---------- 主循环 ----------
     def tick(self):
@@ -1833,7 +2192,7 @@ class DatasetTab(ttk.Frame):
         self.ds = None
         self.files = []
 
-        left = ttk.LabelFrame(self, text="原始采集文件（data/raw/*.csv）", padding=8)
+        left = ttk.LabelFrame(self, text="会话文件（data/raw 自采 · data/external 外部）", padding=8)
         left.pack(side="left", fill="both", expand=True)
         self.lb = tk.Listbox(left, selectmode="extended", height=16, font=("Consolas", 9),
                              activestyle="none")
@@ -1843,6 +2202,7 @@ class DatasetTab(ttk.Frame):
         ttk.Button(row, text="全选", command=lambda: self.lb.select_set(0, "end")).pack(side="left")
         ttk.Button(row, text="刷新", command=self.app.refresh_raw_list).pack(side="left", padx=6)
         ttk.Button(row, text="生成演示数据（模拟）", command=self.make_demo).pack(side="left")
+        ttk.Button(row, text="导入外部数据…", command=self.import_ext).pack(side="left", padx=(6, 0))
 
         right = ttk.Frame(self)
         right.pack(side="left", fill="both", expand=True, padx=(10, 0))
@@ -1875,13 +2235,18 @@ class DatasetTab(ttk.Frame):
         self.txt.see("end")
 
     def reload(self, files):
-        """原始文件列表变化（启动/采集结束/生成演示数据）时刷新，并作废旧数据集。"""
+        """文件列表变化时刷新，并作废旧数据集。
+
+        外部试次只是列在这里备查；默认不选中它们，因为「主数据」和「外部数据」
+        是两条独立的训练路径（外部数据只在「外部预训练」模式里用）。
+        """
         self.files = files
         self.lb.delete(0, "end")
-        for f in files:
-            self.lb.insert("end", os.path.basename(f))
-        if files:
-            self.lb.select_set(0, "end")
+        for i, f in enumerate(files):
+            tag = SOURCE_LABELS.get(source_of(f), "?")
+            self.lb.insert("end", "[%s] %s" % (tag, os.path.basename(f)))
+            if source_of(f) != "external":
+                self.lb.select_set(i)
         self.invalidate()
 
     def invalidate(self):
@@ -1898,10 +2263,11 @@ class DatasetTab(ttk.Frame):
 
     def selected_paths(self):
         idx = self.lb.curselection()
-        if not idx:
-            # 列表刷新会清掉选中项；没勾选时按"全选"处理，避免训练页莫名提示未选择
-            return list(self.files)
-        return [self.files[i] for i in idx]
+        if idx:
+            return [self.files[i] for i in idx]
+        # 列表刷新会清掉选中项；没勾选时回退到「自采 + 模拟」，
+        # 外部试次必须手动勾选才会进入主数据训练（避免无意混训）。
+        return [p for p in self.files if source_of(p) != "external"]
 
     def make_demo(self):
         paths = make_demo_set(RAW_DIR)
@@ -1910,6 +2276,25 @@ class DatasetTab(ttk.Frame):
         for p in paths:
             self.log("  " + os.path.basename(p))
         self.app.say("模拟数据已生成。它不能替代真实采集。")
+
+    def import_ext(self):
+        """导入公开数据集（zip 或已解压目录）→ data/external/ext_*.csv。"""
+        src = filedialog.askopenfilename(title="选择外部数据集（zip）",
+                                         filetypes=[("Zip", "*.zip"), ("所有文件", "*.*")])
+        if not src:
+            src = filedialog.askdirectory(title="或选择已解压的外部数据目录")
+        if not src:
+            return
+        self.log("正在导入：" + src, clear=True)
+        try:
+            paths = import_external(src)
+        except Exception as e:
+            messagebox.showerror("导入失败", f"{type(e).__name__}: {e}")
+            return
+        self.app.refresh_raw_list()
+        self.log("导入完成：%d 个试次 → %s" % (len(paths), EXTERNAL_DIR))
+        self.log("外部数据只用于「④ 训练与评估 → 外部预训练」，默认不参与主数据训练。")
+        self.app.say("外部数据已导入 %d 个试次。" % len(paths))
 
     def build(self):
         paths = self.selected_paths()
@@ -1935,9 +2320,16 @@ class DatasetTab(ttk.Frame):
         self.log("按会话：")
         for r in ds["per_file"]:
             self.log(f"  {r['file']:<34} 原始 {r['rows']:>5} s   窗口 {r['windows']:>5}")
-        self.log("剔除统计：" + "，".join(f"{k}={v}" for k, v in ds["reject"].items()))
-        self.log(f"划分：训练 {int(tr.sum())} / 验证 {int(va.sum())}（验证会话："
-                 f"{', '.join(sorted(set(ds['groups'][va].tolist())))}）")
+        self.log("剔除统计：" + "，".join("%s=%d" % (k, v) for k, v in ds["reject"].items()))
+        inv = group_inventory(ds)
+        n_self = sum(1 for _, _, s in inv if s == "self")
+        n_ext = sum(1 for _, _, s in inv if s == "external")
+        n_sim = sum(1 for _, _, s in inv if s == "sim")
+        self.log("数据构成：自采 %d 个会话 / 外部 %d 个试次 / 模拟 %d 个" % (n_self, n_ext, n_sim))
+        vgroups = sorted(set(ds["groups"][va].tolist()))
+        head = ", ".join(vgroups[:6]) + (" …" if len(vgroups) > 6 else "")
+        self.log("划分：训练 %d / 验证 %d（验证：%s）" % (int(tr.sum()), int(va.sum()), head))
+        self.log(split_note(ds, "session"))
         self.app.say("数据集已构建，可进入「④ 训练与评估」。")
 
     def save_csv(self):
@@ -1968,166 +2360,342 @@ class DatasetTab(ttk.Frame):
 # 14. 页面：训练与评估
 # =============================================================================
 class TrainTab(ttk.Frame):
+    MODES = ["快速训练（留出验证）", "交叉验证（留一会话）", "最终模型（全部会话）", "外部预训练"]
+    HINTS = {
+        "快速训练（留出验证）": "留出 20% 的会话训练一次，用来确认流程通不通；指标偏乐观，不写进报告。",
+        "交叉验证（留一会话）": "每折完整留出一个会话，给出 mean±std；报告里的性能数字应该来自这里。",
+        "最终模型（全部会话）": "用全部会话重训并保存（轮数取交叉验证的最佳轮中位数），不再留验证集。",
+        "外部预训练": "只用 data/external 的公开数据训练，产出 models/pretrained_external.json。",
+    }
+
     def __init__(self, master, app):
-        super().__init__(master, padding=10)
+        super().__init__(master, padding=8)
         self.app = app
         self.thread = None
         self.stop = False
         self.hist = None
         self.result = None
+        self.cv = None
+        self.by_map = {"按会话": "session", "按被试": "subject"}
 
         top = ttk.LabelFrame(self, text="训练配置（1-D CNN：3 × Conv1D + GAP + Dense1）", padding=8)
         top.pack(fill="x")
-        ttk.Label(top, text="最大轮数").grid(row=0, column=0)
+
+        r0 = ttk.Frame(top)
+        r0.pack(fill="x")
+        ttk.Label(r0, text="模式").pack(side="left")
+        self.mode = tk.StringVar(value=self.MODES[0])
+        cbm = ttk.Combobox(r0, textvariable=self.mode, values=self.MODES, width=19,
+                           state="readonly", font=UI_FONT)
+        cbm.pack(side="left", padx=4)
+        cbm.bind("<<ComboboxSelected>>", lambda e: self.update_hint())
+        ttk.Label(r0, text="划分").pack(side="left", padx=(12, 0))
+        self.by = tk.StringVar(value="按会话")
+        ttk.Combobox(r0, textvariable=self.by, values=["按会话", "按被试"], width=7,
+                     state="readonly", font=UI_FONT).pack(side="left", padx=4)
+        ttk.Label(r0, text="折数").pack(side="left", padx=(12, 0))
+        self.folds = tk.StringVar(value="8")
+        ttk.Entry(r0, textvariable=self.folds, width=4).pack(side="left", padx=4)
+        self.pre = tk.BooleanVar(value=False)
+        ttk.Checkbutton(r0, text="用外部预训练初始化", variable=self.pre,
+                        command=self.update_hint).pack(side="left", padx=14)
+
+        r1 = ttk.Frame(top)
+        r1.pack(fill="x", pady=(6, 0))
+        ttk.Label(r1, text="最大轮数").pack(side="left")
         self.epochs = tk.StringVar(value="300")
-        ttk.Entry(top, textvariable=self.epochs, width=7).grid(row=0, column=1, padx=4)
-        ttk.Label(top, text="学习率").grid(row=0, column=2, padx=(12, 0))
+        ttk.Entry(r1, textvariable=self.epochs, width=6).pack(side="left", padx=4)
+        ttk.Label(r1, text="学习率").pack(side="left", padx=(12, 0))
         self.lr = tk.StringVar(value="0.001")
-        ttk.Entry(top, textvariable=self.lr, width=9).grid(row=0, column=3, padx=4)
-        ttk.Label(top, text="批大小").grid(row=0, column=4, padx=(12, 0))
-        self.bs = tk.StringVar(value="32")
-        ttk.Entry(top, textvariable=self.bs, width=6).grid(row=0, column=5, padx=4)
-        self.btn = ttk.Button(top, text="开始训练", command=self.toggle)
-        self.btn.grid(row=0, column=6, padx=14)
-        self.btn_stop = ttk.Button(top, text="停止", command=self.request_stop, state="disabled")
-        self.btn_stop.grid(row=0, column=7)
-        self.info = ttk.Label(top, text="未训练", foreground="#64748b")
-        self.info.grid(row=0, column=8, padx=14)
+        ttk.Entry(r1, textvariable=self.lr, width=8).pack(side="left", padx=4)
+        self.btn = ttk.Button(r1, text="开始", command=self.toggle, width=10)
+        self.btn.pack(side="left", padx=14)
+        self.btn_stop = ttk.Button(r1, text="停止", command=self.request_stop, state="disabled")
+        self.btn_stop.pack(side="left")
+        self.info = ttk.Label(r1, text="数据集：未构建", foreground="#64748b")
+        self.info.pack(side="right")
+
+        r2 = ttk.Frame(top)
+        r2.pack(fill="x", pady=(4, 0))
+        self.hint = ttk.Label(r2, text=self.HINTS[self.MODES[0]], foreground="#64748b")
+        self.hint.pack(side="left")
 
         mid = ttk.Frame(self)
-        mid.pack(fill="x", pady=8)
-        self.loss_plot = LinePlot(mid, height=190)
+        mid.pack(fill="x", pady=6)
+        self.loss_plot = LinePlot(mid, height=170)
         self.loss_plot.pack(side="left", fill="both", expand=True)
-        self.cm = Heatmap(mid, size=200)
-        self.cm.pack(side="left", padx=8)
+        self.cm = Heatmap(mid, size=170)
+        self.cm.pack(side="left", padx=6)
         self.metrics = ttk.Label(mid, text="", justify="left", font=("Consolas", 9))
-        self.metrics.pack(side="left", padx=8, anchor="n")
+        self.metrics.pack(side="left", padx=6, anchor="n")
+
+        cvf = ttk.LabelFrame(self, text="交叉验证明细（每折完整留出一组会话，验证窗口不参与训练）", padding=6)
+        cvf.pack(fill="x")
+        self.cvsum = ttk.Label(cvf, text="尚未运行交叉验证。", foreground="#64748b")
+        self.cvsum.pack(anchor="w")
+        cols = ("fold", "val", "n", "acc", "f1", "auc", "base", "ep")
+        heads = {"fold": "折", "val": "验证组", "n": "窗口", "acc": "acc", "f1": "F1",
+                 "auc": "AUC", "base": "基线acc", "ep": "最佳轮"}
+        widths = {"fold": 40, "val": 250, "n": 60, "acc": 64, "f1": 64, "auc": 64,
+                  "base": 74, "ep": 60}
+        self.cvtable = ttk.Treeview(cvf, columns=cols, show="headings", height=5)
+        for c in cols:
+            self.cvtable.heading(c, text=heads[c])
+            self.cvtable.column(c, width=widths[c], anchor="w" if c == "val" else "center")
+        self.cvtable.pack(fill="x", pady=(4, 0))
 
         self.pbar = ttk.Progressbar(self, mode="determinate", maximum=100)
-        self.pbar.pack(fill="x")
-        self.txt = tk.Text(self, height=10, font=("Consolas", 9), bg="#0b1220", fg="#cbd5e1",
+        self.pbar.pack(fill="x", pady=(6, 0))
+        self.txt = tk.Text(self, height=7, font=("Consolas", 9), bg="#0b1220", fg="#cbd5e1",
                            relief="flat", wrap="word")
         self.txt.pack(fill="both", expand=True, pady=6)
 
         exp = ttk.Frame(self)
         exp.pack(fill="x")
-        ttk.Button(exp, text="保存模型 model.json", command=self.save_model).pack(side="left")
+        ttk.Button(exp, text="保存模型", command=self.save_model).pack(side="left")
         ttk.Button(exp, text="导出 TFLite（需 tensorflow）", command=self.export_tflite).pack(side="left", padx=8)
         ttk.Button(exp, text="导出 C 头文件（int8）", command=self.export_header).pack(side="left")
         ttk.Button(exp, text="一键：演示数据 + 训练", command=self.quick_demo).pack(side="right")
 
+    # ---------- 基础 ----------
     def log(self, s, clear=False):
         if clear:
             self.txt.delete("1.0", "end")
         self.txt.insert("end", s + "\n")
         self.txt.see("end")
 
+    def update_hint(self):
+        txt = self.HINTS.get(self.mode.get(), "")
+        if self.mode.get() == "外部预训练" and self.pre.get():
+            txt = "外部预训练模式忽略「用外部预训练初始化」勾选。"
+        self.hint.config(text=txt)
+
     def on_dataset(self, ds):
         if ds is None:
-            self.info.config(text="数据集：未构建（训练时会现场构建）")
-        else:
-            self.info.config(text=f"数据集：{len(ds['y'])} 窗 × {ds['X'].shape[1]} s")
+            self.info.config(text="数据集：未构建（训练时现场构建）")
+            return
+        srcs = ds.get("sources")
+        n_self = int((srcs == "self").sum()) if srcs is not None else len(ds["y"])
+        n_ext = int((srcs == "external").sum()) if srcs is not None else 0
+        n_grp = len(set(ds["groups"].tolist()))
+        self.info.config(text="数据集：%d 窗 × %d s｜%d 组｜自采 %d / 外部 %d"
+                         % (len(ds["y"]), ds["X"].shape[1], n_grp, n_self, n_ext))
 
     def request_stop(self):
         self.stop = True
-        self.log("已请求停止：当前轮结束后结束训练。")
+        self.log("已请求停止：当前轮结束后结束。")
 
+    # ---------- 启动 ----------
     def toggle(self):
         if self.thread and self.thread.is_alive():
             return
-        paths = self.app.tab_dataset.selected_paths()
-        ds = self.app.ds
-        if not paths and ds is None:
-            messagebox.showwarning("没有数据",
-                                   "「③ 数据集」里还没有可用会话。\n"
-                                   "先采集（或点「一键：演示数据 + 训练」），再回来训练。")
-            return
-        self.stop = False
-        # 注意：Tk 变量只能在主线程读取，先取出数值再交给工作线程
+        mode = self.mode.get()
         try:
             epochs = int(float(self.epochs.get() or 300))
             lr = float(self.lr.get() or 1e-3)
+            folds = int(float(self.folds.get() or 8))
         except ValueError:
-            messagebox.showerror("参数错误", "学习率/轮数必须是数字。")
+            messagebox.showerror("参数错误", "轮数 / 学习率 / 折数必须是数字。")
             return
+        by = self.by_map.get(self.by.get(), "session")
+        init_state, init_name = None, "scratch"
+        if self.pre.get() and mode != "外部预训练":
+            if not os.path.isfile(MODEL_PATH_PRETRAIN):
+                messagebox.showwarning("缺少预训练权重",
+                                       "还没有 models/pretrained_external.json。\n"
+                                       "先把模式切成「外部预训练」跑一次，或取消勾选。")
+                return
+            init_state, _ = load_weights(MODEL_PATH_PRETRAIN)
+            init_name = "external"
+        ds = self.app.ds
+        paths = self.app.tab_dataset.selected_paths()
+
+        if mode == "外部预训练":
+            if not self.app.external_files:
+                messagebox.showwarning("没有外部数据",
+                                       "先在「③ 数据集」点「导入外部数据…」导入 zip 或目录。")
+                return
+            target, args = self._run_pretrain, (epochs, lr, folds)
+        else:
+            if ds is None and not paths:
+                messagebox.showwarning("没有数据",
+                                       "先在「③ 数据集」构建数据集，或选中会话文件。")
+                return
+            target, args = self._run_main, (paths, ds, mode, epochs, lr, by, folds,
+                                            init_state, init_name)
+
+        self.stop = False
         self.btn.config(state="disabled")
         self.btn_stop.config(state="normal")
-        self.log("开始训练…", clear=True)
-        if ds is not None:
-            self.log(f"使用「③ 数据集」已构建的 {len(ds['y'])} 个窗口（不再重新构建）。")
+        self.log("开始：" + mode, clear=True)
+        if init_name == "external":
+            self.log("初始化：外部预训练权重（models/pretrained_external.json）。")
         else:
-            self.log(f"使用 {len(paths)} 个会话文件（未构建数据集，训练时现场构建）。")
-        self.thread = threading.Thread(target=self._run, args=(paths, ds, epochs, lr), daemon=True)
+            self.log("初始化：随机（从零训练）。")
+        if ds is not None and mode != "外部预训练":
+            self.log("使用③页已构建的 %d 个窗口（%d 个会话）。"
+                     % (len(ds["y"]), len(set(ds["groups"].tolist()))))
+        elif mode != "外部预训练":
+            self.log("使用 %d 个会话文件，工作线程里现场构建数据集。" % len(paths))
+        self.thread = threading.Thread(target=target, args=args, daemon=True)
         self.thread.start()
 
-    def _run(self, paths, ds, epochs, lr):
+    def _run_main(self, paths, ds, mode, epochs, lr, by, folds, init_state, init_name):
         try:
+            if ds is None:
+                ds = build_dataset(paths)
+                self.app.train_msgs.put(("log", "数据集构建完成：%d 个窗口。" % len(ds["y"])))
+
             def prog(ep, tot, trl, vl, acc, f1, note):
                 self.app.train_msgs.put(("progress", (ep, tot, trl, vl, acc, f1, note)))
-            if ds is not None:
-                res = train_from_dataset(ds, epochs=epochs, lr=lr,
-                                         stop_flag=lambda: self.stop, progress=prog)
-            else:
-                res = run_training(paths, epochs=epochs, lr=lr,
-                                   stop_flag=lambda: self.stop, progress=prog)
-            self.app.train_msgs.put(("done", res))
-        except Exception as e:
-            self.app.train_msgs.put(("error", f"{type(e).__name__}: {e}"))
 
+            if mode.startswith("交叉"):
+                cv = cv_sessions(ds, folds=folds, by=by, init_state=init_state,
+                                 init_name=init_name, epochs=epochs, lr=lr,
+                                 on_fold=lambda r: self.app.train_msgs.put(("fold", r)),
+                                 stop_flag=lambda: self.stop)
+                self.app.train_msgs.put(("cv", cv))
+            elif mode.startswith("最终"):
+                ep = epochs_from_cv(self.cv, cap=epochs)
+                self.app.train_msgs.put(("log", "在全部会话上重训 %d 轮。" % ep))
+                res = fit_final(ds, init_state=init_state, init_name=init_name,
+                                epochs=ep, lr=lr, progress=prog,
+                                stop_flag=lambda: self.stop)
+                self.app.train_msgs.put(("done", res))
+            else:
+                res = train_from_dataset(ds, epochs=epochs, lr=lr, init_state=init_state,
+                                         init_name=init_name, by=by, progress=prog,
+                                         stop_flag=lambda: self.stop)
+                self.app.train_msgs.put(("done", res))
+        except Exception as e:
+            self.app.train_msgs.put(("error", "%s: %s" % (type(e).__name__, e)))
+
+    def _run_pretrain(self, epochs, lr, folds):
+        try:
+            out = train_external(epochs=epochs, lr=lr, folds=folds,
+                                 on_fold=lambda r: self.app.train_msgs.put(("fold", r)),
+                                 stop_flag=lambda: self.stop)
+            self.app.train_msgs.put(("pretrain", out))
+        except Exception as e:
+            self.app.train_msgs.put(("error", "%s: %s" % (type(e).__name__, e)))
+
+    # ---------- 消息 ----------
     def on_msg(self, kind, payload):
         if kind == "progress":
             ep, tot, trl, vl, acc, f1, note = payload
             self.pbar["value"] = 100.0 * ep / max(1, tot)
-            self.info.config(text=f"第 {ep}/{tot} 轮  train {trl:.4f}  val {vl:.4f}  acc {acc:.3f}")
-            if note:
-                self.log(f"[早停] 验证损失连续 {60} 轮未改善，第 {ep} 轮结束。")
+            if vl == vl:
+                self.info.config(text="第 %d/%d 轮  train %.4f  val %.4f  acc %.3f"
+                                 % (ep, tot, trl, vl, acc))
+            else:
+                self.info.config(text="第 %d/%d 轮  train %.4f" % (ep, tot, trl))
+            if note == "early-stop":
+                self.log("[早停] 验证损失连续 60 轮未改善，第 %d 轮结束。" % ep)
+        elif kind == "fold":
+            self.add_fold_row(payload)
+        elif kind == "cv":
+            self.cv = payload
+            self.show_cv(payload)
+            self.done_ui()
+        elif kind == "pretrain":
+            self.result = payload["res"]
+            self.cv = payload["cv"]
+            self.show_cv(payload["cv"])
+            self.hist = payload["res"]["hist"]
+            self.log("外部预训练完成：%d 轮，权重已存到 models/pretrained_external.json" % payload["epochs"])
+            self.app.say("外部预训练完成，可在主数据训练时勾选「用外部预训练初始化」。")
+            self.done_ui()
+        elif kind == "log":
+            self.log(payload)
         elif kind == "done":
             self.finish(payload)
         elif kind == "error":
-            self.btn.config(state="normal")
-            self.btn_stop.config(state="disabled")
-            self.log("训练失败：" + payload)
+            self.done_ui()
+            self.log("失败：" + payload)
             messagebox.showerror("训练失败", payload)
 
-    def finish(self, res):
+    def done_ui(self):
         self.btn.config(state="normal")
         self.btn_stop.config(state="disabled")
         self.pbar["value"] = 100
+
+    # ---------- 结果展示 ----------
+    def add_fold_row(self, r):
+        val = ", ".join(r.get("val_groups", []))
+        if len(val) > 46:
+            val = val[:44] + "…"
+        self.cvtable.insert("", "end", values=(
+            r["fold"], val, r["n_val"], "%.3f" % r["acc"], "%.3f" % r["f1"],
+            "%.3f" % r["auc"], "%.3f" % r["baseline_acc"], r["best_epoch"]))
+        self.cvtable.yview_moveto(1.0)
+
+    def show_cv(self, cv):
+        a = cv["agg"]
+        self.cvsum.config(
+            text="%d 折（留一%s）  acc %.3f ± %.3f   F1 %.3f ± %.3f   AUC %.3f ± %.3f   基线 acc %.3f"
+                 % (cv["k"], "被试" if cv["by"] == "subject" else "会话",
+                    a["acc"]["mean"], a["acc"]["std"], a["f1"]["mean"], a["f1"]["std"],
+                    a["auc"]["mean"], a["auc"]["std"], a["baseline_acc"]["mean"]),
+            foreground="#0f172a")
+        self.app.say("交叉验证完成：acc %.3f ± %.3f" % (a["acc"]["mean"], a["acc"]["std"]))
+
+    def finish(self, res):
+        self.done_ui()
         self.result = res
         self.app.model, self.app.mu, self.app.sd = res["net"], res["mu"], res["sd"]
         self.app.meta = res["meta"]
         self.hist = res["hist"]
-        m, b = res["metrics"], res["baseline"]
-        self.app.tab_live.refresh_model_info()
-        fmt = lambda v: f"{v:.3f}" if isinstance(v, float) and v == v else "—"  # noqa: E731
-        self.metrics.config(text=(
-            f"验证集（留出会话）\n"
-            f"accuracy  {fmt(m['acc'])}\nF1        {fmt(m['f1'])}\n"
-            f"AUC       {fmt(m['auc'])}\nprecision {fmt(m['precision'])}\n"
-            f"recall    {fmt(m['recall'])}\n\n"
-            f"基线（阈值法）\naccuracy  {fmt(b['acc'])}\nF1        {fmt(b['f1'])}\n\n"
-            f"参数量    {res['meta']['n_params']}\n"
-            f"最佳轮    {res['meta']['best_epoch']}\n"
-            f"训练/验证 {res['meta']['n_train']}/{res['meta']['n_val']}\n"
-            f"验证会话  {', '.join(res['meta']['val_groups'])}"))
-        self.cm.render(cm_matrix(m))
-        self.log("训练完成。")
-        self.log(f"  best epoch = {res['meta']['best_epoch']}，early stopping 生效轮数 = {res['meta']['epochs_run']}")
-        self.log(f"  accuracy={m['acc']:.4f}  F1={m['f1']:.4f}  AUC={m['auc']:.4f}")
-        self.log(f"  对照基线（brief Option A：3s 滑动平均 + 阈值 75）：accuracy={b['acc']:.4f}  F1={b['f1']:.4f}")
-        self.log(f"  混淆矩阵：[[tn={m['confusion']['tn']}, fp={m['confusion']['fp']}], "
-                 f"[fn={m['confusion']['fn']}, tp={m['confusion']['tp']}]]")
-        if res["meta"]["n_val"] < 200:
-            self.log("  [注意] 验证窗口偏少，指标置信区间较宽；请增加会话数或段数。")
-        self.app.say(f"训练完成：acc={m['acc']:.3f}  F1={m['f1']:.3f}")
+        m = res["metrics"]
+        b = res.get("baseline") or {}
+        meta = res["meta"]
+        train_only = meta.get("fit") == "all-sessions"
 
+        def fmt(v):
+            return "%.3f" % v if isinstance(v, float) and v == v else "—"
+
+        head = "训练集（全部会话，仅自检）" if train_only else "验证集（留出会话）"
+        lines = [head,
+                 "accuracy  " + fmt(m["acc"]),
+                 "F1        " + fmt(m["f1"]),
+                 "AUC       " + fmt(m["auc"]),
+                 "precision " + fmt(m["precision"]),
+                 "recall    " + fmt(m["recall"]),
+                 "",
+                 "基线（阈值法）"]
+        if b:
+            lines += ["accuracy  " + fmt(b.get("acc")), "F1        " + fmt(b.get("f1"))]
+        else:
+            lines += ["（最终模型不留验证集）"]
+        lines += ["",
+                  "参数量    %d" % meta.get("n_params", 0),
+                  "初始化    %s" % ("外部预训练" if meta.get("init") == "external" else "随机"),
+                  "轮数      %d" % meta.get("epochs_run", 0),
+                  "训练/验证 %d/%d" % (meta.get("n_train", 0), meta.get("n_val", 0))]
+        if not train_only:
+            lines.append("验证组    " + ", ".join(meta.get("val_groups", [])[:3]))
+        self.metrics.config(text="\n".join(lines))
+        self.cm.render(cm_matrix(m))
+        self.app.tab_live.refresh_model_info()
+        self.log("完成。")
+        self.log("  accuracy=%.4f  F1=%.4f  AUC=%.4f" % (m["acc"], m["f1"], m["auc"]))
+        if train_only:
+            self.log("  [注意] 这是训练集上的数字，只用来确认代码没坏，不能当性能。")
+        if meta.get("split_note"):
+            self.log("  " + meta["split_note"])
+
+    # ---------- 导出 ----------
     def save_model(self):
         if not self.result:
             messagebox.showinfo("提示", "请先训练。")
             return
-        p = save_model(MODEL_PATH, self.result["net"], self.result["mu"], self.result["sd"], self.result["meta"])
-        self.log(f"已保存模型 {p}")
-        self.app.say("模型已保存到 models/model.json")
+        meta = self.result["meta"]
+        external_init = meta.get("init") == "external"
+        path = MODEL_PATH if external_init else MODEL_PATH_SCRATCH
+        p = save_model(path, self.result["net"], self.result["mu"], self.result["sd"], meta)
+        self.log("已保存模型 %s" % p)
+        self.log("  （%s）" % ("交付模型：外部预训练 + 主数据" if external_init else "对照模型：只用主数据从零训练"))
+        self.app.tab_live.refresh_model_list()
+        self.app.say("模型已保存：%s" % os.path.basename(p))
 
     def export_tflite(self):
         if not self.result:
@@ -2136,14 +2704,14 @@ class TrainTab(ttk.Frame):
         try:
             p, n = export_tflite(self.result["net"], self.result["mu"], self.result["sd"],
                                  os.path.join(MODEL_DIR, "model_int8.tflite"))
-            self.log(f"已导出 {p}（{n/1024:.1f} KB，int8 全量化）")
+            self.log("已导出 %s（%.1f KB，int8 全量化）" % (p, n / 1024.0))
         except ImportError:
             messagebox.showerror("缺少 TensorFlow",
                                  "本机未安装 tensorflow，无法直接转 TFLite。\n\n"
                                  "可改用「导出 C 头文件」，或在装有 tensorflow 的机器上运行：\n"
                                  "  python main.py --export-tflite")
         except Exception as e:
-            messagebox.showerror("导出失败", f"{type(e).__name__}: {e}")
+            messagebox.showerror("导出失败", "%s: %s" % (type(e).__name__, e))
 
     def export_header(self):
         if not self.result:
@@ -2151,11 +2719,13 @@ class TrainTab(ttk.Frame):
             return
         p = export_edge_header(self.result["net"], self.result["mu"], self.result["sd"],
                                os.path.join(MODEL_DIR, "neurofocus_model.h"))
-        self.log(f"已导出 {p}（int8 权重 + 标准化参数，可直接放进 MCU 工程）")
+        self.log("已导出 %s（int8 权重 + 标准化参数）" % p)
 
     def quick_demo(self):
         self.app.tab_dataset.make_demo()
         self.app.update_idletasks()
+        self.mode.set(self.MODES[0])
+        self.update_hint()
         self.epochs.set("120")
         self.toggle()
 
@@ -2163,7 +2733,7 @@ class TrainTab(ttk.Frame):
         if self.hist:
             h = self.hist
             self.loss_plot.render([("train", C_MAIN, h["train_loss"]), ("val", C_WARN, h["val_loss"])],
-                                  "损失曲线（BCE）", ylabel=f"{len(h['epoch'])} epochs")
+                                  "损失曲线（BCE）", ylabel="%d epochs" % len(h["epoch"]))
 
 
 # =============================================================================
@@ -2177,7 +2747,11 @@ class LiveTab(ttk.Frame):
 
         top = ttk.Frame(self)
         top.pack(fill="x")
-        ttk.Button(top, text="加载 models/model.json", command=self.load).pack(side="left")
+        ttk.Label(top, text="模型").pack(side="left")
+        self.model_sel = ttk.Combobox(top, values=[], width=27, state="readonly",
+                                      font=UI_FONT)
+        self.model_sel.pack(side="left", padx=4)
+        ttk.Button(top, text="加载", command=self.load).pack(side="left")
         self.btn = ttk.Button(top, text="开始实时推演", command=self.toggle, state="disabled")
         self.btn.pack(side="left", padx=8)
         ttk.Label(top, text="判定阈值").pack(side="left", padx=(16, 2))
@@ -2200,6 +2774,18 @@ class LiveTab(ttk.Frame):
         self.note.pack()
         self.plot = LinePlot(self, height=210)
         self.plot.pack(fill="both", expand=True, pady=6)
+        self.loaded_name = ""
+        self.refresh_model_list()
+
+    def model_choices(self):
+        """models/ 下的全部 json，供答辩时对比 scratch / finetuned 两个模型。"""
+        return sorted(os.path.basename(p) for p in glob.glob(os.path.join(MODEL_DIR, "*.json")))
+
+    def refresh_model_list(self):
+        ch = self.model_choices()
+        self.model_sel["values"] = ch
+        if ch and not self.model_sel.get():
+            self.model_sel.set("model.json" if "model.json" in ch else ch[0])
 
     def refresh_model_info(self):
         if self.app.model is None:
@@ -2207,20 +2793,32 @@ class LiveTab(ttk.Frame):
             self.btn.config(state="disabled")
             return
         meta = self.app.meta or {}
-        self.lbl_model.config(text=f"已加载 · {meta.get('n_params', '?')} 参数 · "
-                                   f"val acc {meta.get('metrics', {}).get('acc', float('nan')):.3f}",
+        mm = meta.get("metrics") or meta.get("metrics_train_only") or {}
+        acc = mm.get("acc", float("nan"))
+        init = "外部预训练" if meta.get("init") == "external" else "随机初始化"
+        self.lbl_model.config(text="已加载 %s · %d 参数 · %s · val acc %.3f"
+                              % (self.loaded_name or "?", meta.get("n_params", 0), init, acc),
                               foreground="#15803d")
         self.btn.config(state="normal")
 
     def load(self):
+        if not self.model_sel.get():
+            self.refresh_model_list()
+        name = self.model_sel.get()
+        if not name:
+            messagebox.showinfo("没有模型",
+                                "models/ 里还没有 json。先在「④ 训练与评估」训练并保存。")
+            return
+        path = os.path.join(MODEL_DIR, name)
         try:
-            net, mu, sd, meta = load_model(MODEL_PATH)
+            net, mu, sd, meta = load_model(path)
         except Exception as e:
-            messagebox.showerror("加载失败", f"{e}\n\n请先在「④ 训练与评估」训练并保存模型。")
+            messagebox.showerror("加载失败", "%s\n\n%s" % (e, path))
             return
         self.app.model, self.app.mu, self.app.sd, self.app.meta = net, mu, sd, meta
+        self.loaded_name = name
         self.refresh_model_info()
-        self.app.say("模型已加载，可开始实时推演。")
+        self.app.say("已加载模型 %s，可开始实时推演。" % name)
 
     def toggle(self):
         self.app.infer_on = not self.app.infer_on
@@ -2384,13 +2982,34 @@ def cli_selftest():
     return 0
 
 
-def cli_train(paths, epochs=300, lr=1e-3):
-    res = run_training(paths, epochs=epochs, lr=lr,
+def default_paths(include_external=False):
+    found = [p for p in glob.glob(os.path.join(RAW_DIR, "*.csv")) if is_raw_csv(p)]
+    if include_external:
+        found += [p for p in glob.glob(os.path.join(EXTERNAL_DIR, "*.csv")) if is_raw_csv(p)]
+    return sorted(found)
+
+
+def _init_weights(name):
+    if name == "external":
+        if not os.path.isfile(MODEL_PATH_PRETRAIN):
+            raise SystemExit("缺少 %s，请先运行 --pretrain。" % MODEL_PATH_PRETRAIN)
+        st, _ = load_weights(MODEL_PATH_PRETRAIN)
+        return st, "external"
+    return None, "scratch"
+
+
+def cli_train(paths, epochs=300, lr=1e-3, by="session", init="scratch"):
+    init_state, init_name = _init_weights(init)
+    res = run_training(paths, epochs=epochs, lr=lr, by=by,
+                       init_state=init_state, init_name=init_name,
                        progress=lambda ep, tot, a, b, c, d, n:
-                       print(f"  epoch {ep:3d}/{tot} train {a:.4f} val {b:.4f} acc {c:.3f}"))
+                       print("  epoch %3d/%d train %.4f val %.4f acc %.3f" % (ep, tot, a, b, c)))
     m = res["metrics"]
-    print(f"\naccuracy={m['acc']:.4f}  F1={m['f1']:.4f}  AUC={m['auc']:.4f}")
+    print("\n初始化 %s   划分 %s" % (init_name, by))
+    print("accuracy=%.4f  F1=%.4f  AUC=%.4f" % (m["acc"], m["f1"], m["auc"]))
     print("混淆矩阵 [[tn, fp], [fn, tp]] =", cm_matrix(m))
+    print("基线（同一验证集）acc=%.4f" % res["baseline"].get("acc", float("nan")))
+    print(res["meta"]["split_note"])
     p = save_model(MODEL_PATH, res["net"], res["mu"], res["sd"], res["meta"])
     print("模型已保存:", p)
     export_dataset_csv(res["ds"], DATASET_PATH)
@@ -2398,6 +3017,74 @@ def cli_train(paths, epochs=300, lr=1e-3):
     dataset_report_html(res["ds"], res["meta"], os.path.join(DATA_DIR, "dataset_report.html"))
     return 0
 
+
+def cli_cv(paths, folds=8, by="session", epochs=300, lr=1e-3, init="scratch"):
+    ds = build_dataset(paths)
+    init_state, init_name = _init_weights(init)
+    n_grp = len(set(keys_of(ds, by).tolist()))
+    print("数据集 %d 窗，%d 个%s；初始化 %s"
+          % (len(ds["y"]), n_grp, "被试" if by == "subject" else "会话", init_name))
+    if n_grp < 3:
+        print("[警告] 分组少于 3 个，交叉验证的数字只能当流程检查，不能写进结论。")
+
+    def show(r):
+        print("  fold %d  验证=%-30s n=%4d  acc %.3f  F1 %.3f  AUC %.3f  基线 %.3f  最佳轮 %d"
+              % (r["fold"], ",".join(r["val_groups"])[:30], r["n_val"],
+                 r["acc"], r["f1"], r["auc"], r["baseline_acc"], r["best_epoch"]))
+
+    cv = cv_sessions(ds, folds=folds, by=by, init_state=init_state, init_name=init_name,
+                     epochs=epochs, lr=lr, on_fold=show)
+    a = cv["agg"]
+    print("\n[%s] %d 折  acc %.3f ± %.3f   F1 %.3f ± %.3f   AUC %.3f ± %.3f   基线 acc %.3f"
+          % (init_name, cv["k"], a["acc"]["mean"], a["acc"]["std"], a["f1"]["mean"],
+             a["f1"]["std"], a["auc"]["mean"], a["auc"]["std"], a["baseline_acc"]["mean"]))
+    out = os.path.join(DATA_DIR, "cv_%s.json" % init_name)
+    with open(out, "w", encoding="utf-8") as f:
+        json.dump(cv, f, ensure_ascii=False, indent=2)
+    print("明细:", out)
+    return 0
+
+
+def cli_pretrain(epochs=200, lr=1e-3, folds=2):
+    def show(r):
+        print("  fold %d  留出=%-10s n=%4d  acc %.3f  F1 %.3f  AUC %.3f  最佳轮 %d"
+              % (r["fold"], ",".join(r["val_groups"]), r["n_val"], r["acc"], r["f1"],
+                 r["auc"], r["best_epoch"]))
+    out = train_external(epochs=epochs, lr=lr, folds=folds, on_fold=show)
+    a = out["cv"]["agg"]
+    print("\n外部留一被试：acc %.3f ± %.3f   F1 %.3f ± %.3f   AUC %.3f ± %.3f"
+          % (a["acc"]["mean"], a["acc"]["std"], a["f1"]["mean"], a["f1"]["std"],
+             a["auc"]["mean"], a["auc"]["std"]))
+    print("最终预训练权重：%d 轮，全部外部数据 → %s" % (out["epochs"], MODEL_PATH_PRETRAIN))
+    return 0
+
+
+def cli_final(paths, by="session", init="scratch", epochs=300, lr=1e-3):
+    ds = build_dataset(paths)
+    init_state, init_name = _init_weights(init)
+    ep = epochs
+    cvp = os.path.join(DATA_DIR, "cv_%s.json" % init_name)
+    cvmeta = None
+    if os.path.isfile(cvp):
+        with open(cvp, encoding="utf-8") as f:
+            cv = json.load(f)
+        if cv.get("folds"):
+            ep = epochs_from_cv(cv)
+            cvmeta = {"k": cv["k"], "by": cv["by"],
+                      "acc_mean": cv["agg"]["acc"]["mean"], "acc_std": cv["agg"]["acc"]["std"],
+                      "f1_mean": cv["agg"]["f1"]["mean"], "f1_std": cv["agg"]["f1"]["std"],
+                      "auc_mean": cv["agg"]["auc"]["mean"], "auc_std": cv["agg"]["auc"]["std"]}
+    res = fit_final(ds, init_state=init_state, init_name=init_name, epochs=ep, lr=lr)
+    if cvmeta:
+        res["meta"]["cv"] = cvmeta
+    path = MODEL_PATH if init_name == "external" else MODEL_PATH_SCRATCH
+    save_model(path, res["net"], res["mu"], res["sd"], res["meta"])
+    print("最终模型（%s，%d 轮，%d 窗）→ %s"
+          % (init_name, ep, len(ds["y"]), path))
+    if cvmeta:
+        print("交叉验证估计：acc %.3f ± %.3f  F1 %.3f ± %.3f"
+              % (cvmeta["acc_mean"], cvmeta["acc_std"], cvmeta["f1_mean"], cvmeta["f1_std"]))
+    return 0
 
 
 def cli_record(port=DEFAULT_PORT, baud=DEFAULT_BAUD, subject="S01",
@@ -2482,14 +3169,24 @@ def cli_record(port=DEFAULT_PORT, baud=DEFAULT_BAUD, subject="S01",
 
 
 def main(argv=None):
-    for d in (DATA_DIR, RAW_DIR, MODEL_DIR, DOC_DIR):
+    for d in (DATA_DIR, RAW_DIR, MODEL_DIR, DOC_DIR, EXTERNAL_DIR):
         os.makedirs(d, exist_ok=True)
     ap = argparse.ArgumentParser(description="NeuroFocus：单通道 EEG 专注度解码（BMEG3103 Final Project）")
-    ap.add_argument("--selftest", action="store_true", help="无硬件自检（协议/梯度/端到端）")
+    ap.add_argument("--selftest", action="store_true", help="无硬件自检（协议/梯度/端到端/交叉验证）")
     ap.add_argument("--make-demo", action="store_true", help="生成模拟会话 CSV")
-    ap.add_argument("--train", nargs="*", metavar="CSV", help="训练并保存模型")
+    ap.add_argument("--import-external", metavar="ZIP_OR_DIR",
+                    help="导入公开数据集（zip 或目录）→ data/external")
+    ap.add_argument("--pretrain", action="store_true", help="阶段 1：只用外部数据预训练")
+    ap.add_argument("--train", nargs="*", metavar="CSV", help="留出验证训练一次并保存 model.json")
+    ap.add_argument("--cv", type=int, metavar="K", help="留一会话交叉验证（K 折，只出指标）")
+    ap.add_argument("--fit-final", action="store_true", help="阶段 2：用全部会话重训最终模型")
+    ap.add_argument("--by", choices=["session", "subject"], default="session",
+                    help="划分单位：会话（默认）或被试")
+    ap.add_argument("--init", choices=["scratch", "external"], default="scratch",
+                    help="初始化：随机（默认）或外部预训练权重")
     ap.add_argument("--epochs", type=int, default=300)
     ap.add_argument("--lr", type=float, default=1e-3)
+    ap.add_argument("--folds", type=int, default=8, help="--cv 的折数（默认 8）")
     ap.add_argument("--export-tflite", action="store_true", help="把已保存模型转 int8 TFLite")
     ap.add_argument("--record", action="store_true", help="命令行按协议采集真实数据（静息/心算交替）")
     ap.add_argument("--port", default=DEFAULT_PORT)
@@ -2506,17 +3203,35 @@ def main(argv=None):
     if args.make_demo:
         print("\n".join(make_demo_set(RAW_DIR)))
         return 0
-    if args.train is not None:
-        paths = args.train or sorted(p for p in glob.glob(os.path.join(RAW_DIR, "*.csv"))
-                                     if is_raw_csv(p))
+    if args.import_external:
+        made = import_external(args.import_external)
+        print("导入 %d 个试次 → %s" % (len(made), EXTERNAL_DIR))
+        return 0
+    if args.pretrain:
+        return cli_pretrain(epochs=args.epochs, lr=args.lr, folds=max(2, args.folds))
+    if args.cv is not None:
+        paths = default_paths()
         if not paths:
             print("没有可用 CSV，请先 --make-demo 或采集真实数据。")
             return 2
-        return cli_train(paths, epochs=args.epochs, lr=args.lr)
+        return cli_cv(paths, folds=args.cv, by=args.by, epochs=args.epochs,
+                      lr=args.lr, init=args.init)
+    if args.fit_final:
+        paths = default_paths()
+        if not paths:
+            print("没有可用 CSV。")
+            return 2
+        return cli_final(paths, by=args.by, init=args.init, epochs=args.epochs, lr=args.lr)
+    if args.train is not None:
+        paths = args.train or default_paths()
+        if not paths:
+            print("没有可用 CSV，请先 --make-demo 或采集真实数据。")
+            return 2
+        return cli_train(paths, epochs=args.epochs, lr=args.lr, by=args.by, init=args.init)
     if args.export_tflite:
         net, mu, sd, meta = load_model(MODEL_PATH)
         p, n = export_tflite(net, mu, sd, os.path.join(MODEL_DIR, "model_int8.tflite"))
-        print(f"{p} ({n} bytes)")
+        print("%s (%d bytes)" % (p, n))
         return 0
 
     root = tk.Tk()
