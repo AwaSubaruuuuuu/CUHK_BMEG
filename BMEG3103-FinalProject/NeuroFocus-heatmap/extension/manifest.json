@@ -1,0 +1,32 @@
+{
+  "manifest_version": 3,
+  "name": "NeuroFocus 注意力热力图",
+  "version": "0.1.0",
+  "description": "在 B 站 / YouTube 视频旁显示实时注意力矩阵热力图：绿色=集中、橙色=不集中；点击时间格跳转并重新测量。配合本地 NeuroFocus 推理服务使用。",
+  "minimum_chrome_version": "116",
+  "permissions": ["sidePanel", "storage", "tabs"],
+  "host_permissions": [
+    "*://www.bilibili.com/*",
+    "*://*.youtube.com/*",
+    "http://127.0.0.1:8765/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "side_panel": {
+    "default_path": "panel.html"
+  },
+  "action": {
+    "default_title": "注意力热力图"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "*://www.bilibili.com/video/*",
+        "*://www.youtube.com/watch*"
+      ],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}

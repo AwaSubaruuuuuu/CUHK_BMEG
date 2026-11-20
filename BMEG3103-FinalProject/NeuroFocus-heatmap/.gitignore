@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# 本地跑出来的临时文件
+*.log
+*.csv
+!docs/*.csv
+
+# 操作系统
+.DS_Store
+Thumbs.db
+desktop.ini

@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>注意力热力图</title>
+    <link rel="stylesheet" href="panel.css" />
+  </head>
+  <body>
+    <div class="wrap">
+      <header>
+        <div class="headRow">
+          <span id="dot" class="dot off"></span>
+          <strong>注意力热力图</strong>
+          <span id="stateText" class="muted">本地服务未连接</span>
+        </div>
+        <div id="videoLine" class="videoLine">正在等待 B 站 / YouTube 视频…</div>
+      </header>
+
+      <section class="gauge">
+        <div class="gaugeTop">
+          <div class="pct"><span id="pct">--</span><small>%</small></div>
+          <div id="verdict" class="verdict">—</div>
+        </div>
+        <div class="bar">
+          <div class="fill" id="barFill"></div>
+          <div class="mark" id="thrMark"></div>
+        </div>
+        <div id="subLine" class="sub">等待本地推理服务…</div>
+      </section>
+
+      <section class="ctrl">
+        <select id="srcSel" title="数据源">
+          <option value="sim">模拟数据（演示）</option>
+          <option value="serial">TGAM 串口</option>
+        </select>
+        <button id="btnStart" class="primary">开始测量</button>
+        <button id="btnStop" disabled>停止</button>
+        <button id="btnCalib" disabled>校准</button>
+      </section>
+
+      <section class="ctrl portRow" id="portRow" hidden>
+        <input id="portSel" list="portList" placeholder="COM7" autocomplete="off"
+               title="串口：TGAM 头环 / USB-TTL / 蓝牙接收器" />
+        <datalist id="portList"></datalist>
+        <button id="btnPorts" title="重新扫描串口">刷新串口</button>
+      </section>
+
+      <section class="bridge" id="bridgeBar" hidden>
+        <div class="bRow">
+          <span id="brDot" class="dot off"></span>
+          <span id="brText" class="bName">Arduino 桥</span>
+          <button id="btnLed" class="tiny" disabled title="Arduino 上的本地 LED 反馈">LED</button>
+          <button id="btnPing" class="tiny" disabled title="发 #PING 测通">PING</button>
+        </div>
+        <div id="brMeta" class="bMeta muted"></div>
+      </section>
+
+      <div id="marks" class="marks" hidden></div>
+
+      <section class="matrixHead">
+        <span>时间热力图</span>
+        <span id="rangeLine" class="muted">—</span>
+      </section>
+
+      <div id="matrixWrap" class="matrixWrap">
+        <div id="matrix" class="matrix"></div>
+      </div>
+
+      <div class="legend">
+        <span class="muted">Less</span>
+        <i style="background:#0e4429"></i>
+        <i style="background:#006d32"></i>
+        <i style="background:#26a641"></i>
+        <i style="background:#39d353"></i>
+        <i style="background:#7ef0a8"></i>
+        <span class="muted">More</span>
+        <span class="sep"></span>
+        <i style="background:#f0883e"></i>
+        <span class="muted">不集中</span>
+      </div>
+
+      <footer>
+        <div class="cfgRow">
+          <label>格宽
+            <select id="binSel">
+              <option value="5">5 秒</option>
+              <option value="10">10 秒</option>
+              <option value="15">15 秒</option>
+              <option value="30">30 秒</option>
+            </select>
+          </label>
+          <label class="lagLabel">延迟补偿
+            <input id="lagRange" type="range" min="0" max="5" step="0.5" value="2" />
+            <span id="lagVal">2.0s</span>
+          </label>
+        </div>
+        <div class="footRow">
+          <button id="btnExport">导出 CSV</button>
+          <button id="btnClear">清空本视频</button>
+        </div>
+        <div id="hint" class="hint"></div>
+      </footer>
+    </div>
+    <div id="tip" class="tip"></div>
+    <script src="panel.js"></script>
+  </body>
+</html>
