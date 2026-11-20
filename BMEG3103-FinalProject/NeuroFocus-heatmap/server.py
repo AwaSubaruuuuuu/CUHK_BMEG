@@ -43,13 +43,32 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 
+def _is_main_branch(nf_dir: str) -> bool:
+    """判断这个目录是不是 main 分支那份 NeuroFocus（12 维 / 3061 参数）。
+
+    同一台机器上经常同时存在两份：`NeuroFocus`（two-stage-14f，14 维）和
+    `NeuroFocus-main`（12 维）。热力图只认 main 那份——14f 的模型 meta 里 features=0、
+    也没有 `zscore`，硬跑会一直报 `no attribute 'zscore'`。
+    """
+    path = os.path.join(nf_dir, "main.py")
+    if not os.path.isfile(path) or not os.path.isfile(os.path.join(nf_dir, "models", "model.json")):
+        return False
+    try:
+        with open(path, encoding="utf-8", errors="ignore") as f:
+            return "def zscore" in f.read()
+    except OSError:
+        return False
+
+
 def _find_nf_dir() -> str:
-    """按常见布局找 NeuroFocus（main 分支那份）：环境变量 > 同级 > 上一级 > 本机已知路径。
+    """按常见布局找 **main 分支**那份 NeuroFocus：环境变量 > 同级 > 上一级 > 本机已知路径。
 
     支持的三种摆法：
       - 交付/仓库布局：NeuroFocus-heatmap 与 NeuroFocus 并列（本仓库就是这样）
       - 早期交付布局：与 NeuroFocus-main 并列
       - 开发布局：dev/<proj>/server.py 与 <proj 上级>/NeuroFocus-main
+    优先选「main 分支」特征（有 `def zscore` + models/model.json）的目录；
+    一个都不符合时退回第一个装了 main.py 的目录，让报错信息更直白。
     """
     env = os.environ.get("NF_DIR")
     cands = []
@@ -61,11 +80,14 @@ def _find_nf_dir() -> str:
         os.path.join(HERE, os.pardir, os.pardir, "NeuroFocus-main"),  # 开发布局：dev/<proj>
         r"D:\Learning\BMEG3103\Final Project\NeuroFocus-main",
     ]
+    cands = [os.path.normpath(os.path.abspath(c)) for c in cands]
     for c in cands:
-        c = os.path.normpath(os.path.abspath(c))
+        if _is_main_branch(c):
+            return c
+    for c in cands:
         if os.path.isfile(os.path.join(c, "main.py")):
             return c
-    return os.path.normpath(os.path.abspath(cands[0]))
+    return cands[0]
 
 
 DEFAULT_NF_DIR = _find_nf_dir()

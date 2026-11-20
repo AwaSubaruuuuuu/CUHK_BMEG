@@ -36,6 +36,11 @@ NeuroFocus-heatmap/
 > 服务启动时会自动按 `../NeuroFocus` → `../NeuroFocus-main` → `NF_DIR` 环境变量的顺序
 > 去找 `main.py` 和 `models/model.json`，所以克隆下来直接跑就能用；要用别的模型就加
 > `--model 路径` 或设 `NF_DIR`。
+>
+> ⚠️ 只认 **main 分支**那份（12 维 / 3061 参数）。如果同一个文件夹里还有 two-stage-14f 版
+> 的 `NeuroFocus`（14 维 / 3157 参数），服务会自动跳过它——14f 的模型里 `features=0`
+> 也没有 `zscore`，硬跑会一直报 `no attribute 'zscore'`。两份都叫 `NeuroFocus` 时，
+> 用 `NF_DIR` 显式指过去。
 
 ## 为什么不是「纯插件」
 扩展拿不到 TGAM 的蓝牙串口，也无法加载 `model.json` 跑那套分类流程，所以拆成两件：
