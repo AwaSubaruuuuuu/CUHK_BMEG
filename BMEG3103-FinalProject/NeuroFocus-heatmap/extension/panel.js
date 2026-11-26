@@ -21,6 +21,14 @@ const S = {
   binSec: 10,
   lag: 2.0,
   thr: 0.5,
+  thrDefault: 0.5,
+  thrSource: "default",
+  calibrated: false,
+  models: [],       // GET /models 的原始列表
+  modelId: "",      // 当前模型 id（也是存储 key 的一部分）
+  calibLeft: 0,
+  calibTotal: 30,
+  calibTimer: null,
   bvid: "",
   title: "",
   duration: 0,
@@ -148,7 +156,9 @@ function setConnected(on) {
   if (!on) {
     S.running = false;
     setDot("off", "本地服务未连接");
-    $("subLine").textContent = `请先运行：py -3 server.py（${API}）`;
+    $("subLine").textContent = `本地推理服务没在运行：双击 heatmap\\run.bat 启动，或前台 py -3 server.py（${API}）`;
+    stopCalibCountdown();
+    renderBadge();
     syncButtons();
   } else {
     setDot("on", "已连接");
@@ -160,19 +170,15 @@ function onEvent(msg) {
     case "state": {
       setConnected(true);
       S.running = !!msg.running;
-      if (msg.model) S.model = msg.model;
       S.source = msg.source || "";
       if (typeof msg.thr === "number") S.thr = msg.thr;
+      // 模型身份变了：先把旧模型的格子落盘，再换 key 重新载入本视频在新模型下的数据
+      if (msg.model) adoptModel(msg.model);
       setDot(S.running ? "live" : "on", S.running ? "测量中" : "已连接 · 待机");
-      const m = S.model;
+      // adoptModel 里有 await，这一行不能读 S.model（可能还停在旧模型上）
+      const m = msg.model || S.model;
       const parts = [];
-      if (m) {
-        parts.push(
-          `模型 ${m.params} 参数 · ${m.features} 维 · val acc ${
-            m.acc != null ? m.acc.toFixed(3) : "—"
-          }`
-        );
-      }
+      if (m) parts.push(`模型 ${m.id} · ${m.params} 参数 · ${m.features} 维`);
       parts.push(`阈值 ${S.thr.toFixed(2)}`);
       if (S.running && S.source) {
         const label = { sim: "模拟数据（演示）", serial: "头环串口", replay: "回放" }[S.source] || S.source;
@@ -189,9 +195,14 @@ function onEvent(msg) {
     case "calib":
       if (msg.done) {
         if (typeof msg.thr === "number") S.thr = msg.thr;
-        hint(msg.text || "校准完成", "ok");
+        if (typeof msg.calibrated === "boolean") S.calibrated = msg.calibrated;
+        stopCalibCountdown();
+        renderBadge();
+        renderCalib();
         renderGauge();
+        hint(msg.text || "校准完成", msg.ok === false ? "warn" : "ok");
       } else {
+        startCalibCountdown(msg.seconds || 30);
         hint(msg.text || `静息校准中…`, "");
       }
       break;
@@ -211,6 +222,12 @@ function syncButtons() {
   $("btnStop").disabled = !S.connected || !S.running;
   $("btnCalib").disabled = !S.connected || !S.running;
   $("btnStart").textContent = S.running ? "测量中…" : "开始测量";
+  // 换模型要停止之后才能点：服务端也会拒绝，这里先拦一道，省得点了没反应
+  $("modelSel").disabled = !S.connected || S.running;
+  $("btnModels").disabled = !S.connected;
+  $("modelSel").title = S.running
+    ? "测量中不能换模型：先停止再切换"
+    : "当前模型。切换后立刻按该模型的阈值生效。";
 }
 
 async function post(path, body) {
@@ -221,6 +238,208 @@ async function post(path, body) {
   });
   return res.json();
 }
+
+/* ------------------------------------------------------------------ */
+/* 模型与校准                                                          */
+/* ------------------------------------------------------------------ */
+// 服务端报来的模型就是真相：面板不自己猜 id，只负责把界面刷新到跟它一致。
+async function adoptModel(m) {
+  if (!m || !m.id) return;
+  const changed = !!S.modelId && m.id !== S.modelId;
+  if (changed) await flushSave();   // 旧模型的格子先落盘（此刻 key 还是旧的）
+  S.model = m;
+  S.modelId = m.id;
+  if (typeof m.thr === "number") S.thr = m.thr;
+  if (typeof m.thr_default === "number") S.thrDefault = m.thr_default;
+  S.thrSource = m.thr_source || "default";
+  S.calibrated = !!m.calibrated;
+  if (changed) {
+    if (!S.running) await reloadVideoData();
+    savePrefs();
+  }
+  syncModelSel();
+  renderModelBox();
+  renderBadge();
+  renderCalib();
+  renderGauge();
+}
+
+// 换模型后，本视频的数据要换成「新模型」那一份：同一个视频，两个模型各记各的
+async function reloadVideoData() {
+  S.cells.clear();
+  S.noisy.clear();
+  S.marks = [];
+  S.pass = 1;
+  S.painted.clear();
+  S.nowBin = -1;
+  S.lastTime = 0;
+  const saved = S.bvid ? await loadVideo(S.bvid) : null;
+  applySaved(saved);
+  renderMarks();
+  rebuildGrid();
+}
+
+function applySaved(saved) {
+  if (saved && saved.cells) {
+    for (const [sec, arr] of Object.entries(saved.cells)) {
+      S.cells.set(Number(sec), { sum: arr[0], n: arr[1], pass: arr[2] || 1 });
+    }
+    S.pass = 1 + Math.max(0, ...Array.from(S.cells.values(), (r) => (r.pass || 1) - 1));
+  }
+  if (saved && Array.isArray(saved.noisy)) {
+    for (const sec of saved.noisy) S.noisy.set(Number(sec), 1);
+  }
+  if (saved && Array.isArray(saved.marks)) {
+    S.marks = saved.marks
+      .map((m) => ({ at: Number(m[0]) || 0, t: Number(m[1]) || 0 }))
+      .sort((a, b) => a.at - b.at);
+  }
+}
+
+function renderModelBox() {
+  const m = S.model;
+  $("modelNow").textContent = m ? m.id : "未连接";
+  if (!m) {
+    $("modelInfo").textContent = "—";
+    return;
+  }
+  const bits = [`${m.params} 参数`, `${m.features} 维`, `${m.window}s 窗`];
+  if (m.acc != null) bits.push(`acc ${m.acc.toFixed(3)}`);
+  if (m.trained_at) bits.push(m.trained_at);
+  bits.push(`阈值 ${Number(m.thr).toFixed(2)}`);
+  $("modelInfo").textContent = bits.join(" · ");
+}
+
+// 仪表盘角标：区分「这个模型校准过」和「只是在用它的默认阈值」
+function renderBadge() {
+  const b = $("thrBadge");
+  if (!S.connected) {
+    b.className = "badge";
+    b.textContent = "未连接";
+    return;
+  }
+  if (S.calibrated) {
+    b.className = "badge calib";
+    b.textContent = `已校准 ${S.thr.toFixed(2)}`;
+  } else {
+    b.className = "badge";
+    b.textContent = `未校准 · 默认 ${S.thrDefault.toFixed(2)}`;
+  }
+}
+
+function renderCalib() {
+  const box = $("calibInfo");
+  const track = $("calibTrack");
+  const on = S.calibLeft > 0;
+  track.hidden = !on;
+  if (on) {
+    const frac = 1 - S.calibLeft / Math.max(1, S.calibTotal);
+    $("calibFill").style.width = `${Math.max(0, Math.min(1, frac)) * 100}%`;
+    box.textContent = `校准中：还剩 ${S.calibLeft}s（保持静息，别动，别说话）`;
+    return;
+  }
+  if (!S.connected) {
+    box.textContent = "—";
+  } else if (S.calibrated) {
+    box.textContent = `已校准：阈值 ${S.thr.toFixed(2)}（当前模型，已保存）`;
+  } else {
+    box.textContent =
+      `未校准：正在用这个模型自带的默认阈值 ${S.thrDefault.toFixed(2)}，建议先静息校准 30 秒`;
+  }
+}
+
+function startCalibCountdown(sec) {
+  stopCalibCountdown();
+  S.calibTotal = Math.max(1, Number(sec) || 30);
+  S.calibLeft = S.calibTotal;
+  renderCalib();
+  S.calibTimer = setInterval(() => {
+    S.calibLeft = Math.max(0, S.calibLeft - 1);
+    renderCalib();
+    if (!S.calibLeft) stopCalibCountdown();
+  }, 1000);
+}
+
+function stopCalibCountdown() {
+  clearInterval(S.calibTimer);
+  S.calibTimer = null;
+  S.calibLeft = 0;
+  renderCalib();
+}
+
+async function refreshModels() {
+  try {
+    const r = await fetch(API + "/models", { cache: "no-store" }).then((x) => x.json());
+    S.models = Array.isArray(r.models) ? r.models : [];
+    renderModelOptions();
+    const ok = S.models.filter((m) => m.ok).length;
+    hint(`模型目录 ${S.models.length} 个文件，可用 ${ok} 个`, ok ? "ok" : "warn");
+    return r;
+  } catch (e) {
+    hint("连不上本地服务，模型列表没刷新", "warn");
+    return null;
+  }
+}
+
+function renderModelOptions() {
+  const sel = $("modelSel");
+  sel.textContent = "";
+  if (!S.models.length) {
+    const o = document.createElement("option");
+    o.value = "";
+    o.textContent = "（模型目录是空的）";
+    o.disabled = true;
+    sel.appendChild(o);
+    return;
+  }
+  for (const m of S.models) {
+    const o = document.createElement("option");
+    o.value = m.id;
+    const when = m.trained_at ? " · " + m.trained_at : "";
+    o.textContent = m.ok ? `${m.id}${when}` : `${m.id}（不可用）`;
+    o.title = m.ok
+      ? `${m.params} 参数 · ${m.features} 维${m.acc != null ? " · acc " + m.acc.toFixed(3) : ""}`
+      : m.reason;
+    o.disabled = !m.ok;     // 不兼容的模型留在列表里但点不了，鼠标悬停能看到原因
+    sel.appendChild(o);
+  }
+  // 当前模型可能是用 --model 直接指的文件，不在目录里
+  if (S.modelId && !S.models.some((m) => m.id === S.modelId)) {
+    const o = document.createElement("option");
+    o.value = S.modelId;
+    o.textContent = `${S.modelId}（不在模型目录里）`;
+    sel.appendChild(o);
+  }
+  syncModelSel();
+}
+
+function syncModelSel() {
+  const sel = $("modelSel");
+  if (!sel) return;
+  if (S.modelId && Array.from(sel.options).some((o) => o.value === S.modelId)) {
+    sel.value = S.modelId;
+  }
+}
+
+async function switchModel() {
+  const id = $("modelSel").value;
+  if (!id || id === S.modelId) return;
+  if (S.running) {
+    hint("测量中不能换模型：先停止，再切换", "warn");
+    syncModelSel();
+    return;
+  }
+  await flushSave();
+  const r = await post("/model", { id }).catch(() => null);
+  if (!r || !r.ok) {
+    hint((r && r.error) || "切换失败", "warn");
+    syncModelSel();
+    return;
+  }
+  await adoptModel(r.model);
+  hint(`已切到 ${r.model.id}，阈值 ${Number(r.model.thr).toFixed(2)}`, "ok");
+}
+
 
 /* ------------------------------------------------------------------ */
 /* 分数 -> 时间格                                                       */
@@ -266,13 +485,7 @@ async function onBridge(m) {
 
   if (m.mark) {
     // 物理按键按下：毫秒级事件，立刻记到当前视频时间上
-    const st = await getVideoState();
-    const at = st && st.ok ? Math.max(0, st.currentTime - S.lag) : 0;
-    S.marks.push({ at, t: Date.now() });
-    S.marks.sort((a, b) => a.at - b.at);
-    renderMarks();
-    scheduleSave();
-    hint("已标记 " + fmtTime(at) + "（点击标签可回看）", "ok");
+    await addMarkNow("按键标记");
   }
 
   if (m.artifact) {
@@ -318,7 +531,7 @@ function addNoisy(sec) {
   paintBin(Math.floor(sec / S.binSec));
 }
 
-function renderMarks() {
+async function renderMarks() {
   const box = $("marks");
   box.textContent = "";
   box.hidden = S.marks.length === 0;
@@ -335,6 +548,21 @@ function renderMarks() {
     });
     box.appendChild(b);
   });
+}
+
+// 标记：以前只有 Arduino 那个物理按键能打，现在面板按钮 / 快捷键 M 也能打
+async function addMarkNow(src = "标记") {
+  const st = await getVideoState();
+  if (!st || !st.ok) {
+    hint("没找到视频页，标记不成", "warn");
+    return;
+  }
+  const at = Math.max(0, st.currentTime - S.lag);
+  S.marks.push({ at, t: Date.now() });
+  S.marks.sort((a, b) => a.at - b.at);
+  renderMarks();
+  scheduleSave();
+  hint(`${src} ${fmtTime(at)}（点标签可回看）`, "ok");
 }
 
 async function toggleLed() {
@@ -391,20 +619,7 @@ async function syncVideo(st) {
     const saved = await loadVideo(S.bvid);
     S.noisy.clear();
     S.marks = [];
-    if (saved && saved.cells) {
-      for (const [sec, arr] of Object.entries(saved.cells)) {
-        S.cells.set(Number(sec), { sum: arr[0], n: arr[1], pass: arr[2] || 1 });
-      }
-      S.pass = 1 + Math.max(0, ...Array.from(S.cells.values(), (r) => (r.pass || 1) - 1));
-    }
-    if (saved && Array.isArray(saved.noisy)) {
-      for (const sec of saved.noisy) S.noisy.set(Number(sec), 1);
-    }
-    if (saved && Array.isArray(saved.marks)) {
-      S.marks = saved.marks
-        .map((m) => ({ at: Number(m[0]) || 0, t: Number(m[1]) || 0 }))
-        .sort((a, b) => a.at - b.at);
-    }
+    applySaved(saved);
     renderMarks();
     renderBridge();
     $("videoLine").textContent = `${vidLabel(S.bvid)} · ${S.title}`.slice(0, 96);
@@ -575,7 +790,9 @@ function renderGauge() {
 /* ------------------------------------------------------------------ */
 /* 存储                                                                */
 /* ------------------------------------------------------------------ */
-const keyFor = (bvid) => "nfh:v1:" + bvid;
+// 存储 key 带上模型 id：同一个视频、两个模型的数据各存各的，换模型不会互相覆盖。
+// 旧的 nfh:v1:<bvid> 保持原样不动——新版不读也不删，万一要翻旧数据还在。
+const keyFor = (bvid) => `nfh:v2:${S.modelId || "default"}:${bvid}`;
 
 // 视频 id 展示：B 站存 BV 号，YouTube 存 "yt:xxxx"，这里转成人看得懂的标签
 function vidLabel(id) {
@@ -619,7 +836,9 @@ async function flushSave() {
 
 async function savePrefs() {
   try {
-    await chrome.storage.local.set({ "nfh:prefs": { binSec: S.binSec, lag: S.lag } });
+    await chrome.storage.local.set({
+      "nfh:prefs": { binSec: S.binSec, lag: S.lag, model: S.modelId },
+    });
   } catch (e) {}
 }
 
@@ -697,10 +916,29 @@ function bind() {
     try {
       const r = await post("/calibrate", {});
       if (!r.ok) hint(r.error || "校准失败", "warn");
-      else hint("静息校准开始：保持闭眼放松 30 秒", "");
+      else {
+        startCalibCountdown(r.seconds || 30);
+        hint(`静息校准开始：保持闭眼放松 ${r.seconds || 30} 秒`, "");
+      }
     } catch (e) {
       hint("连接不到本地服务", "warn");
     }
+  });
+
+  $("modelSel").addEventListener("change", switchModel);
+  $("btnModels").addEventListener("click", async () => {
+    await refreshModels();
+  });
+  $("btnMark").addEventListener("click", () => addMarkNow("标记"));
+
+  // 看视频时手一般不在侧边栏上，给个快捷键（M = mark）
+  document.addEventListener("keydown", (e) => {
+    if (e.key !== "m" && e.key !== "M") return;
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+    const t = e.target;
+    if (t && /^(INPUT|SELECT|TEXTAREA)$/.test(t.tagName)) return;
+    e.preventDefault();
+    addMarkNow("标记");
   });
 
   $("binSel").addEventListener("change", (e) => {
@@ -820,7 +1058,9 @@ function exportCsv() {
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
-  a.download = `nfh_${(S.bvid || "video").replace(/[^0-9A-Za-z_-]/g, "_")}_${S.binSec}s.csv`;
+  a.download = `nfh_${(S.modelId || "model").replace(/[^0-9A-Za-z_-]/g, "_")}_${(
+    S.bvid || "video"
+  ).replace(/[^0-9A-Za-z_-]/g, "_")}_${S.binSec}s.csv`;
   document.body.appendChild(a);
   a.click();
   a.remove();
@@ -837,6 +1077,7 @@ async function init() {
     const p = pref["nfh:prefs"] || {};
     if (p.binSec) S.binSec = Number(p.binSec);
     if (typeof p.lag === "number") S.lag = Number(p.lag);
+    if (p.model) S.modelId = String(p.model);
     if (pref["nfh:source"]) $("srcSel").value = pref["nfh:source"];
     if (pref["nfh:port"]) S.port = String(pref["nfh:port"]);
   } catch (e) {}
@@ -851,8 +1092,12 @@ async function init() {
   renderGauge();
   renderBridge();
   renderMarks();
+  renderModelBox();
+  renderBadge();
+  renderCalib();
   setDot("off", "本地服务未连接");
   connectEvents();
+  refreshModels();
   pollVideo();
   setInterval(pollVideo, 1000);
 }

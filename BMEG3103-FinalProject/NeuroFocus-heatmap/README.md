@@ -5,7 +5,7 @@
 
 > 这是一个**独立程序**，不改动 `NeuroFocus-main` 的任何文件：`server.py` 只是在运行时用
 > `importlib` 把它的 `main.py` 当库加载，复用 `TGAMParser / SerialSource /
-> frame_features / zscore / FocusCNN / rest_threshold` 和 `models/model.json`。
+> frame_features / zscore / FocusCNN / rest_threshold`；模型则从本目录 `models/` 里挑。
 
 ---
 
@@ -13,9 +13,11 @@
 
 ```
 NeuroFocus-heatmap/
-├─ run.bat                一键启动（自动补装依赖，然后 --source sim 启动服务）
+├─ run.bat                双击启动：补装依赖 + 起服务
 ├─ requirements.txt       numpy / pyserial
 ├─ server.py              本地推理服务（127.0.0.1:8765，SSE 推送分数）
+├─ models/                可选模型：一个 json 一个模型，面板下拉里挑
+├─ state/                 阈值落盘（每个模型一份；运行时生成，不入库）
 ├─ arduino/
 │  └─ nfh_bridge/nfh_bridge.ino  Arduino 透传桥固件（原样转发 TGAM + 附加状态帧）
 ├─ extension/             Chrome 扩展（Manifest V3）
@@ -32,15 +34,13 @@ NeuroFocus-heatmap/
 ```
 
 > **放在仓库里的位置**：本目录位于 `BMEG3103-FinalProject/NeuroFocus-heatmap/`，与
-> `BMEG3103-FinalProject/NeuroFocus/`（main 分支那份程序，模型就在里面）并列。
+> `BMEG3103-FinalProject/NeuroFocus/`（main 分支那份程序）并列。
 > 服务启动时会自动按 `../NeuroFocus` → `../NeuroFocus-main` → `NF_DIR` 环境变量的顺序
-> 去找 `main.py` 和 `models/model.json`，所以克隆下来直接跑就能用；要用别的模型就加
-> `--model 路径` 或设 `NF_DIR`。
+> 去找 `main.py`（解析 TGAM、算特征、模型结构都在里面）；目录名不一样就用 `--nf-dir` 指过去。
 >
-> ⚠️ 只认 **main 分支**那份（12 维 / 3061 参数）。如果同一个文件夹里还有 two-stage-14f 版
-> 的 `NeuroFocus`（14 维 / 3157 参数），服务会自动跳过它——14f 的模型里 `features=0`
-> 也没有 `zscore`，硬跑会一直报 `no attribute 'zscore'`。两份都叫 `NeuroFocus` 时，
-> 用 `NF_DIR` 显式指过去。
+> **模型本身不再从那边拿**：本目录 `models/` 里的 json 才是可选列表，启动时默认加载第一个能用的。
+> ⚠️ 只认 **main 分支**那份（12 维 / 3061 参数）。14 维 two-stage 版的模型（`features=0`、
+> 也没有 `zscore`）会在下拉里列出来但标成「不可用」，点不了。
 
 ## 为什么不是「纯插件」
 扩展拿不到 TGAM 的蓝牙串口，也无法加载 `model.json` 跑那套分类流程，所以拆成两件：
@@ -56,38 +56,38 @@ NeuroFocus-heatmap/
 
 ## 一、准备（只做一次）
 
-**最省事**：双击 `run.bat`。它会检查 numpy / pyserial，缺了自动 `pip install`，
-然后用模拟数据把服务起在 `http://127.0.0.1:8765`。
+1. 装依赖：`py -3 -m pip install -r requirements.txt`（numpy、pyserial）；或直接双击 `run.bat`，它会先补装再起服务。
+2. 把模型 JSON 放进 `models/`（文件名就是模型身份，见后面「换模型」）。
+3. 在 Chrome 里加载扩展，见「三、加载扩展」。
 
-手动版：
+## 二、每次使用
 
-```bat
-:: 1) 依赖：numpy 必须有，pyserial 只有接真头环才需要
-py -3 -m pip install numpy pyserial
-```
-
-`server.py` 默认去 `..\NeuroFocus-main` 找模型；如果目录名不一样，用 `--nf-dir` 指过去。
-
-## 二、启动本地服务
+双击 `run.bat`（会补装依赖并起服务），或者手动在窗口里跑：
 
 ```bat
-cd "D:\Learning\BMEG3103\Final Project\NeuroFocus-heatmap"
+cd "...\NeuroFocus-heatmap"
 
-:: 先不接头环，用模拟数据把整条链路跑通（数据是编的，只用于演示）
-py -3 server.py --source sim
-
-:: 接好头环（MindWave / TGAM，57600），串口按实际情况改
+:: 接真头环
 py -3 server.py --source serial --serial-port COM7
+
+:: 不接硬件，用模拟数据把整条链路跑通（数据是编的，只用于演示）
+py -3 server.py --source sim
 
 :: 回放以前录的会话 CSV（可加速）
 py -3 server.py --source replay --replay "..\NeuroFocus-main\data\raw\S01_20261110_160753.csv" --speed 2
 ```
 
-看到 `[+] http://127.0.0.1:8765  ...` 就是起来了；浏览器里打开
-`http://127.0.0.1:8765/health` 能返回 JSON 即正常。
+服务起来以后：打开 B 站视频 → 右下角方格 → 侧边栏 → 面板里点「开始测量」。
 
-常用参数：`--http-port 8765`、`--model <model.json>`、`--nf-dir <NeuroFocus-main>`、
-`--no-autostart`（启动时不自动开始采集）。
+浏览器里打开 `http://127.0.0.1:8765/health` 能返回 JSON 即正常。
+
+`server.py` 默认按 `../NeuroFocus` → `../NeuroFocus-main` → `NF_DIR` 环境变量的顺序去找 `main.py`；
+目录名不一样就用 `--nf-dir` 指过去。
+
+常用参数：`--source serial|sim|replay|none`、`--serial-port COM7`、`--http-port 8765`、
+`--models-dir models`（模型目录）、`--model <model.json>`（指定默认加载哪个）、
+`--nf-dir <NeuroFocus>`、`--no-autostart`（启动时不自动开始采集）、
+`--check-models`（只校验 `models/` 里每个文件然后退出，不启动服务）。
 
 ### 接硬件（TGAM / MindWave）：A 蓝牙、B 直连、C Arduino 三种都行
 
@@ -170,8 +170,9 @@ py -3 server.py --source replay --replay "..\NeuroFocus-main\data\raw\S01_202611
 
 1. 视频正常播放，侧边栏「数据源」选好后点 **开始测量**。
 2. 前 8 秒是在攒窗口，还没有分数；之后每秒出一个概率，矩阵里对应当前播放位置的那一格会亮起蓝框。
-3. **校准（重要）**：坐下、闭眼、别动，点 **校准**，保持静息 30 秒。结束后阈值会从 0.5 换成
-   你自己的静息分位值，绿/橙的分界才准。阈值只影响颜色与「专注/静息」判定，不改模型。
+3. **校准（重要）**：坐下、闭眼、别动，点 **校准**，面板上会出现 30 秒倒计时和进度条。
+   结束后阈值从该模型自带的默认值换成你自己的静息分位值，绿/橙的分界才准。结果**按模型存盘**
+   （换模型不会串、重启还在）。阈值只影响颜色与「专注/静息」判定，不改模型。
 4. **看热力图**：一格 = 一段时间（默认 10 秒，可在「格宽」里切 5/15/30 秒，**改格宽不会丢数据**，
    因为原始分数是按「秒」存的）。绿越亮越集中，橙越亮越涣散，深灰 = 还没测过。
 5. **点格子重看**：点任意一格 → 视频跳到该格开头（+0.2 s）并自动播放 → 这一轮新测的分数覆盖
@@ -187,10 +188,28 @@ py -3 server.py --source replay --replay "..\NeuroFocus-main\data\raw\S01_202611
 从「你看到画面」到「模型出分」之间有 1~3 秒的滞后（窗口 8 秒 + 蓝牙 + 推理）。默认把分数记在
 `当前播放时间 - 2.0s`；如果颜色整体偏晚（该绿的格子亮在更后面），把滑块往大调；偏早就调小。
 
+### 换模型（换人 / 重训之后）
+
+训练不在插件里做。用 `NeuroFocus/main.py` 的 `--record` 采数据、`--train` 出新的 `model.json`，然后：
+
+1. 把文件复制进 `heatmap/models/`，取名 **`subjectNN-YYYY-MM-DD.json`**。下拉里显示的就是
+   「文件名 + json 里的 `trained_at`」，同名会覆盖（视为同一模型、旧的校准值继续沿用）。
+2. 侧边栏「模型与校准」里点 **刷新** → 在下拉里挑 → 立刻生效。测量中下拉是灰的，要先停止。
+3. 第一次用某个模型：角标显示「未校准 · 默认 x.xx」，这个 x.xx 是**那个模型自己** `model.json`
+   里的 `threshold.default`，不是全局 0.5。坐下闭眼点一次校准。
+4. 换走再换回：回到那个模型自己存过的校准值；它没校过就用它自己的默认值。
+
+一句话规则：**当前模型的校准值 > 该模型的 `threshold.default`**，两者都没有才退到 0.5。
+落盘在 `state/thresholds.json`，重启还在。
+
+命令行也能查：`py -3 server.py --check-models` 逐个校验 `models/`，不可用的会写出原因
+（维数不对、JSON 坏了……）。
+
 ### 数据存在哪
 
-`chrome.storage.local`，key 是 `nfh:v1:<bvid>`，按视频分开存，换视频自动加载旧结果。
-点「清空本视频」只清当前这个 bvid。
+`chrome.storage.local`，key 是 `nfh:v2:<模型名>:<bvid>`：**同一个视频在不同模型下是两份数据**，
+互不覆盖；旧的 `nfh:v1:<bvid>` 保留但不再读。标记（`⚑`）也存在这一份里，所以换模型时标记
+跟着换。点「清空本视频」只清「当前模型 + 当前视频」。
 
 ---
 
@@ -198,8 +217,8 @@ py -3 server.py --source replay --replay "..\NeuroFocus-main\data\raw\S01_202611
 
 - **模拟数据不是测量**：`--source sim` 造的是落在模型训练分布内的合成样本（由 `DemoSource` 生成），
   只为演示链路与配色；任何结论都必须用 `serial` 或 `replay` 的真实数据。
-- **单通道、被试相关**：模型用的是 FP1 单导 + 8 秒窗，跨被试/跨天漂移明显；换人、换天建议重新校准，
-  必要时用 NeuroFocus-main 里的 `--train` 重训。
+- **单通道、被试相关**：模型用的是 FP1 单导 + 8 秒窗，跨被试/跨天漂移明显。谁测就用谁的模型
+  （见「换模型」），同一人也建议隔天重新校准；必要时用 `NeuroFocus/main.py --train` 重训。
 - **判定不是医学结论**：这是课程项目里的「专注度代理量」，不是注意力诊断。
 - B 站前端改版可能让 `content.js` 里的选择器失效；目前依次尝试
   `#bilibili-player video` / `.bpx-player-container video` / `.bpx-player-video-wrap video` / `video`。
@@ -218,20 +237,27 @@ py -3 server.py --source replay --replay "..\NeuroFocus-main\data\raw\S01_202611
 
 | 现象 | 原因 / 处理 |
 | --- | --- |
-| 侧边栏一直「本地服务未连接」 | `server.py` 没起，或端口不是 8765；看终端有没有报错 |
+| 侧边栏一直「本地服务未连接」 | 服务没起：双击 `run.bat`，或前台 `py -3 server.py`；浏览器打开 `http://127.0.0.1:8765/health` 看有没有 JSON |
+| 面板一直「等待开始」但设备管理器里有 COMx | 那个口没被认出来（不是蓝牙 SPP 口）：把接收器重新配对；或手动 `py -3 server.py --source serial --serial-port COMx` 看报什么错 |
+| 点了「开始测量」很久没有分数 | 口开了但对端没发数据：头环没开机 / 电量低 / 波特率不是 57600 |
+| 测量中突然停了 | 断连保护：串口不再来数据就自动停。检查线/蓝牙，然后重新点「开始测量」 |
 | 悬浮按钮不出现 | 页面没刷新（扩展装好后要 F5）；或不在 `/video/`（B 站）或 `/watch?v=`（YouTube）页面；Shorts 本来就不注入 |
 | 侧边栏显示「未找到视频播放器」 | 页面上没有 `<video>`（首次加载慢、或 YouTube 是嵌入页）；等两秒会自动重试 |
 | 概率一直是 100% 或一直 0% | 数据源不对（`sim` 曾因量纲问题恒为 1.0，已修）；真机则是信号质量差，看提示里的 signal 码 |
 | 提示「信号质量差，这一秒不计入」 | TGAM 的 signal 码异常（接触不良/电量低），这一秒会跳过而不是记 0 |
 | 点格子没反应 | 视频页需刷新；或播放器在广告/付费内容上不可跳转 |
 | `ModuleNotFoundError: numpy` | `py -3 -m pip install numpy` |
-| 想换模型 | `--model 别的\model.json`；注意 main 分支是 12 维/3061 参数，two-stage-14f 的权重不能混用 |
+| 想换模型 | 把 json 放进 `models/` → 面板点「刷新」→ 下拉里选（见「换模型」）；命令行用 `--check-models` 先验证 |
+| 下拉里某个模型是灰的 | 它和当前 `main.py` 不匹配（多半是 14 维/坏 JSON），鼠标悬停看原因 |
 
 ## 七、开发期自检
 
 ```bat
 py -3 -m py_compile server.py
 node --check extension\panel.js
+
+:: 只校验 models/ 里每个模型能不能用（不启动服务、不占串口）
+py -3 server.py --nf-dir "..\NeuroFocus" --check-models
 
 :: 服务用 --source sim 起来后：看 80 秒分数的分布是否真的在 0.1~0.9 之间
 py -3 tools\probe_sim.py

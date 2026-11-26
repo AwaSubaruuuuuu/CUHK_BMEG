@@ -154,6 +154,156 @@ def list_serial_ports() -> list:
 
 
 # ---------------------------------------------------------------------------
+# 模型仓库（heatmap/models/*.json）
+#
+# 这套推理链的形状是写死在 NeuroFocus/main.py 里的：frame_features() 永远输出
+# 12 列，滑动窗永远是 WINDOW=8 秒。所以「换模型」只允许换**同一结构、不同权重**
+# 的 model.json；维数或窗长不一样的文件能读进来，但第一次推理就会崩（或者更糟：
+# 静默算错）。这里在加载前就把它们筛掉，理由写进 reason 交给面板显示。
+# ---------------------------------------------------------------------------
+MODEL_DIR = os.path.join(HERE, "models")
+STATE_DIR = os.path.join(HERE, "state")
+THRESHOLD_FILE = os.path.join(STATE_DIR, "thresholds.json")
+
+WEIGHT_KEYS = ("c1.W", "c1.b", "c2.W", "c2.b", "c3.W", "c3.b", "fc.W", "fc.b")
+
+
+def model_id_of(path: str) -> str:
+    """模型身份 = 文件名（去扩展名）。
+
+    阈值记录、面板的格子存储都按这个 id 归档，所以你换一个同名文件就等于
+    换了一个模型——旧模型的校准值不会串过来。
+    """
+    return os.path.splitext(os.path.basename(str(path)))[0]
+
+
+def inspect_model(nf, path: str) -> dict:
+    """静态校验一个 model.json 能不能被这套 12 维 / 8 秒窗的推理链吃掉。
+
+    不建网络、不跑推理，只比字段和形状，所以扫目录时逐个文件跑也不慢。
+    """
+    info = {"path": os.path.abspath(str(path)), "id": model_id_of(path),
+            "name": os.path.basename(str(path)), "ok": False, "reason": "",
+            "trained_at": None, "acc": None, "params": 0, "features": 0}
+    try:
+        with open(path, encoding="utf-8") as f:
+            p = json.load(f)
+    except Exception as e:  # noqa: BLE001
+        info["reason"] = f"读不了这个 JSON：{e}"
+        return info
+    if not isinstance(p, dict):
+        info["reason"] = "不是模型文件（顶层不是对象）"
+        return info
+
+    meta = p.get("meta") if isinstance(p.get("meta"), dict) else {}
+    info["trained_at"] = meta.get("trained_at")
+    info["acc"] = (meta.get("metrics") or {}).get("acc")
+    info["params"] = int(meta.get("n_params") or p.get("params") or 0)
+
+    want = list(getattr(nf, "FEATURE_NAMES", []))
+    got = list(p.get("features") or [])
+    info["features"] = len(got)
+    if not want:
+        info["reason"] = "NeuroFocus 里没有 FEATURE_NAMES，无法校验"
+        return info
+    if got != want:
+        if len(got) != len(want):
+            info["reason"] = f"特征维数不对：这份是 {len(got)} 维，本插件只认 {len(want)} 维"
+        else:
+            diff = [f"{i}:{a}!={b}" for i, (a, b) in enumerate(zip(got, want)) if a != b]
+            info["reason"] = "特征名/顺序不一致（" + "，".join(diff[:3]) + "）"
+        return info
+
+    want_win = int(getattr(nf, "WINDOW", 8))
+    win = p.get("window")
+    if win is not None and int(win) != want_win:
+        info["reason"] = f"时间窗不对：这份是 {win} 秒，本插件固定 {want_win} 秒"
+        return info
+
+    weights = p.get("weights") or {}
+    miss = [k for k in WEIGHT_KEYS if k not in weights]
+    if miss:
+        info["reason"] = "缺少权重：" + "，".join(miss)
+        return info
+    for key in ("mu", "sd"):
+        arr = p.get(key)
+        if not isinstance(arr, list) or len(arr) != len(want):
+            info["reason"] = f"{key} 的长度不是 {len(want)}"
+            return info
+
+    info["ok"] = True
+    return info
+
+
+def scan_models(nf, model_dir: str) -> list:
+    """扫一个目录下的 *.json，逐个校验；id 重名时补 -2、-3。"""
+    out, seen = [], {}
+    try:
+        names = sorted(n for n in os.listdir(model_dir) if n.lower().endswith(".json"))
+    except OSError:
+        return out
+    for name in names:
+        info = inspect_model(nf, os.path.join(model_dir, name))
+        base = info["id"]
+        n = seen.get(base, 0) + 1
+        seen[base] = n
+        if n > 1:
+            info["id"] = f"{base}-{n}"
+        out.append(info)
+    return out
+
+
+class ThresholdStore:
+    """按模型身份保存判定阈值。
+
+    存在的理由：校准一次要 30 秒，而 Engine.start() 过去每次都会把阈值重置回
+    model.json 里的 threshold.default——停一下再开，校准就白做了。
+    """
+
+    def __init__(self, path: str = THRESHOLD_FILE):
+        self.path = path
+        self.lock = threading.Lock()
+
+    def _read(self) -> dict:
+        try:
+            with open(self.path, encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict) and isinstance(data.get("models"), dict):
+                return data
+        except (OSError, ValueError):
+            pass
+        return {"version": 1, "models": {}}
+
+    def get(self, model_id: str) -> dict:
+        with self.lock:
+            return dict(self._read()["models"].get(model_id) or {})
+
+    def put(self, model_id: str, thr: float, source: str) -> dict:
+        with self.lock:
+            data = self._read()
+            entry = {"thr": round(float(thr), 4), "source": str(source),
+                     "saved_at": time.strftime("%Y-%m-%d %H:%M:%S")}
+            data["models"][model_id] = entry
+            os.makedirs(os.path.dirname(self.path), exist_ok=True)
+            tmp = self.path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            os.replace(tmp, self.path)      # 原子替换：写一半断电也不会坏掉旧文件
+            return dict(entry)
+
+    def drop(self, model_id: str) -> None:
+        with self.lock:
+            data = self._read()
+            if data["models"].pop(model_id, None) is None:
+                return
+            os.makedirs(os.path.dirname(self.path), exist_ok=True)
+            tmp = self.path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            os.replace(tmp, self.path)
+
+
+# ---------------------------------------------------------------------------
 # Arduino 桥（TGAM 字节流里混着的 plen=0x0C 状态帧）
 # ---------------------------------------------------------------------------
 BRIDGE_PLEN = 0x0C
@@ -366,19 +516,26 @@ class Hub:
 # 推理引擎
 # ---------------------------------------------------------------------------
 class Engine:
-    def __init__(self, nf, model_path: str, hub: Hub):
+    def __init__(self, nf, model_path: str, hub: Hub, models_dir: str = MODEL_DIR):
         self.nf = nf
         self.hub = hub
-        self.model_path = model_path
-        self.net, self.mu, self.sd, self.meta = nf.load_model(model_path)
         self.lock = threading.RLock()
+        self.models_dir = os.path.abspath(models_dir)
+        self.thr_store = ThresholdStore()
+        self.model_path = ""
+        self.model_id = ""
+        self.model_name = ""
+        self.net = self.mu = self.sd = None
+        self.meta = {}
+        self.thr = 0.5
+        self.thr_default = 0.5
+        self.thr_source = "default"
         self.source = None
         self.worker = None
         self.q = None
         self.running = False
         self.source_kind = ""
         self.serial_port = ""
-        self.thr = float((self.meta.get("threshold") or {}).get("default", 0.5))
         self.win = deque(maxlen=nf.WINDOW)
         self.probs = deque(maxlen=3600)
         self.ema = None
@@ -392,11 +549,82 @@ class Engine:
         self.bridge_marks = []
         self.bridge_pub_at = 0.0
 
+        loaded = self._load_model(model_path)
+        if not loaded.get("ok"):
+            raise SystemExit(f"[x] 模型不可用：{loaded.get('error')}")
+
+    # -- 模型 --------------------------------------------------------------
+    def _load_model(self, path: str) -> dict:
+        """加载模型，并按它自己的身份恢复阈值（没有记录就用它自己的默认值）。
+
+        调用方负责保证此刻没有在测量——中途换模型会让窗口里 8 秒的旧特征喂进
+        新网络，结果没有物理意义。
+        """
+        nf = self.nf
+        info = inspect_model(nf, path)
+        if not info["ok"]:
+            return {"ok": False, "error": info["reason"], "model": info}
+        try:
+            net, mu, sd, meta = nf.load_model(info["path"])
+        except Exception as e:  # noqa: BLE001
+            return {"ok": False, "error": f"加载失败：{e}"}
+        with self.lock:
+            self.net, self.mu, self.sd = net, mu, sd
+            self.meta = meta or {}
+            self.model_path = info["path"]
+            self.model_id = info["id"]
+            self.model_name = info["name"]
+            self.thr_default = float((self.meta.get("threshold") or {}).get("default", 0.5))
+            self._restore_threshold()
+        return {"ok": True, "model": self.model_summary()}
+
+    def _restore_threshold(self) -> None:
+        """阈值来源优先级：该模型存过的校准值 > 该模型自己的 threshold.default。
+
+        注意不是全局 0.5：不同训练出来的模型默认阈值不同（你这份是 0.5，
+        meta 里还记着 rest=0.2 / val_best=0.1）。
+        """
+        saved = self.thr_store.get(self.model_id)
+        thr = saved.get("thr")
+        if isinstance(thr, (int, float)):
+            self.thr = float(min(0.95, max(0.05, thr)))
+            self.thr_source = str(saved.get("source") or "saved")
+        else:
+            self.thr = self.thr_default
+            self.thr_source = "default"
+
+    def list_models(self) -> list:
+        return scan_models(self.nf, self.models_dir)
+
+    def set_model(self, path: str = "", model_id: str = "") -> dict:
+        """切换当前模型。测量中直接拒绝（面板会在按钮上先做一次拦截）。"""
+        with self.lock:
+            if self.running:
+                return {"ok": False, "error": "测量中不能换模型：先停止，再切换"}
+        if not path and model_id:
+            for m in self.list_models():
+                if m["id"] == model_id:
+                    path = m["path"]
+                    break
+        if not path:
+            return {"ok": False, "error": "没有指定模型（给 path 或 id）"}
+        if not os.path.isfile(path):
+            return {"ok": False, "error": f"找不到模型文件：{path}"}
+        with self.lock:
+            if self.running:
+                return {"ok": False, "error": "测量中不能换模型：先停止，再切换"}
+            r = self._load_model(path)
+            if r.get("ok"):
+                self.publish_state("idle", f"已切换模型：{self.model_name}")
+        return r
+
     # -- 状态 --------------------------------------------------------------
     def model_summary(self) -> dict:
         m = self.meta or {}
         met = m.get("metrics") or {}
         return {
+            "id": self.model_id,
+            "name": self.model_name,
             "path": self.model_path,
             "params": int(m.get("n_params") or 0),
             "features": len(m.get("features") or []),
@@ -405,17 +633,25 @@ class Engine:
             "acc": met.get("acc"),
             "f1": met.get("f1"),
             "auc": met.get("auc"),
+            "thr": round(self.thr, 3),
+            "thr_default": round(self.thr_default, 3),
+            "thr_source": self.thr_source,
+            "calibrated": self.thr_source == "calib",
         }
 
     def status(self) -> dict:
         return {
             "running": self.running,
             "thr": round(self.thr, 3),
+            "thr_default": round(self.thr_default, 3),
+            "thr_source": self.thr_source,
+            "calibrated": self.thr_source == "calib",
             "source": self.source_kind,
             "port": self.serial_port,
             "scores": self.n_scores,
             "calibrating": self.calib_left > 0,
             "error": self.last_error,
+            "models_dir": self.models_dir,
             "bridge": {
                 "frames": self.bridge.n_frames,
                 "marks": self.bridge.marks,
@@ -425,9 +661,18 @@ class Engine:
             "model": self.model_summary(),
         }
 
+    def log(self, level: str, text: str):
+        """一条给人看的日志：面板会显示，命令行也打一行。"""
+        print(f"  [{level}] {text}")
+        self.hub.publish({"type": "log", "level": level, "text": text})
+
     def publish_state(self, state: str, text: str = ""):
         self.hub.publish({"type": "state", "state": state, "text": text,
-                          "thr": round(self.thr, 3), "running": self.running,
+                          "thr": round(self.thr, 3),
+                          "thr_default": round(self.thr_default, 3),
+                          "thr_source": self.thr_source,
+                          "calibrated": self.thr_source == "calib",
+                          "running": self.running,
                           "source": self.source_kind, "port": self.serial_port,
                           "model": self.model_summary()})
 
@@ -471,7 +716,8 @@ class Engine:
             self.bridge_last = {}
             self.bridge_marks = []
             self.bridge_pub_at = 0.0
-            self.thr = float((self.meta.get("threshold") or {}).get("default", 0.5))
+            # 阈值不再无脑回默认：该模型存过校准值就沿用它，否则用它自己的默认值。
+            self._restore_threshold()
             self.source = src
             self.source_kind = source
             self.serial_port = port_label
@@ -558,6 +804,9 @@ class Engine:
             self.calib_probs = []
             self.calib_left = sec
             self.hub.publish({"type": "calib", "done": False, "seconds": sec,
+                              "model": self.model_id,
+                              "thr": round(self.thr, 3),
+                              "calibrated": self.thr_source == "calib",
                               "text": f"请保持静息、闭眼、不说话（{sec} 秒）"})
             return {"ok": True, "seconds": sec}
 
@@ -565,7 +814,12 @@ class Engine:
         with self.lock:
             self.thr = float(min(0.95, max(0.05, thr)))
             val = self.thr
-        # 顺手把阈值同步给 Arduino：片上 LED 用它做本地反馈
+            # 手动设的值也落盘，但来源记成 manual：面板据此仍然显示「未校准」，
+            # 因为 30 秒静息校准和拍脑袋给个数不是一回事。
+            if self.model_id:
+                self.thr_store.put(self.model_id, val, "manual")
+                self.thr_source = "manual"
+        # 顺手把阈值同步给 Arduino：片上 LED 用它做本地反馈（蓝牙场景下没人收，无妨）
         sent = self.send_bridge("#THR:%d" % int(round(val * 100)))
         return {"ok": True, "thr": round(val, 3), "bridge": sent.get("ok", False)}
 
@@ -680,12 +934,27 @@ class Engine:
                 if ok:
                     self.calib_probs.append(p)
                 if self.calib_left == 0:
-                    self.thr = float(nf.rest_threshold(self.calib_probs))
-                    self.send_bridge("#THR:%d" % int(round(self.thr * 100)))
-                    self.hub.publish({"type": "calib", "done": True,
-                                      "n": len(self.calib_probs),
-                                      "thr": round(self.thr, 3),
-                                      "text": f"静息校准完成（{len(self.calib_probs)} 窗），阈值 {self.thr:.2f}"})
+                    if self.calib_probs:
+                        thr = float(nf.rest_threshold(self.calib_probs))
+                        with self.lock:
+                            self.thr = float(min(0.95, max(0.05, thr)))
+                            self.thr_source = "calib"
+                            if self.model_id:
+                                self.thr_store.put(self.model_id, self.thr, "calib")
+                        self.send_bridge("#THR:%d" % int(round(self.thr * 100)))
+                        self.hub.publish({"type": "calib", "done": True, "ok": True,
+                                          "model": self.model_id,
+                                          "n": len(self.calib_probs),
+                                          "thr": round(self.thr, 3),
+                                          "calibrated": True,
+                                          "text": f"静息校准完成（{len(self.calib_probs)} 窗），"
+                                                  f"阈值 {self.thr:.2f}（已保存）"})
+                    else:
+                        self.hub.publish({"type": "calib", "done": True, "ok": False,
+                                          "model": self.model_id, "n": 0,
+                                          "thr": round(self.thr, 3),
+                                          "calibrated": self.thr_source == "calib",
+                                          "text": "校准失败：这 30 秒没有一帧可用信号（电极没戴好？）"})
 
             self.hub.publish({
                 "type": "score",
@@ -768,6 +1037,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(APP.status())
         if path == "/model":
             return self._json(APP.engine.model_summary())
+        if path == "/models":
+            return self._json({"ok": True, "dir": APP.engine.models_dir,
+                               "current": APP.engine.model_id,
+                               "models": APP.engine.list_models()})
         if path == "/ports":
             return self._json({"ok": True, "ports": list_serial_ports(),
                                "default": getattr(APP.engine.nf, "DEFAULT_PORT", "COM7")})
@@ -795,6 +1068,11 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(eng.stop())
         if path == "/calibrate":
             return self._json(eng.calibrate(body.get("seconds")))
+        if path == "/model":
+            # 换模型：{"path": "...json"} 或 {"id": "model_s01"}；测量中会被拒绝
+            r = eng.set_model(path=str(body.get("path") or ""),
+                              model_id=str(body.get("id") or ""))
+            return self._json(r, 200 if r.get("ok") else 409)
         if path == "/threshold":
             try:
                 return self._json(eng.set_threshold(float(body.get("thr"))))
@@ -818,6 +1096,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             hello = {"type": "state", "state": "connected" if not APP.engine.running else "running",
                      "text": "", "thr": round(APP.engine.thr, 3),
+                                          "ports": len(list_serial_ports()),
                      "running": APP.engine.running, "model": APP.engine.model_summary()}
             self.wfile.write(b"data: " + json.dumps(hello, ensure_ascii=False).encode() + b"\n\n")
             self.wfile.flush()
@@ -844,6 +1123,13 @@ class Server(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
 
+    def handle_error(self, request, client_address):
+        # 浏览器 / 健康检查断开连接是常态，不值得把 traceback 写进日志
+        exc = sys.exc_info()[1]
+        if isinstance(exc, (ConnectionResetError, ConnectionAbortedError, BrokenPipeError)):
+            return
+        super().handle_error(request, client_address)
+
 
 # ---------------------------------------------------------------------------
 # 入口
@@ -854,7 +1140,12 @@ def main(argv=None) -> int:
     ap.add_argument("--host", default=HOST)
     ap.add_argument("--http-port", type=int, default=PORT, help="本服务的端口（默认 8765）")
     ap.add_argument("--nf-dir", default=DEFAULT_NF_DIR, help="NeuroFocus-main 目录")
-    ap.add_argument("--model", default=None, help="模型 JSON（默认 NeuroFocus-main/models/model.json）")
+    ap.add_argument("--model", default=None,
+                    help="模型 JSON（默认取 --models-dir 里第一个可用模型，再退回 NeuroFocus 自带那份）")
+    ap.add_argument("--models-dir", default=MODEL_DIR,
+                    help="可选模型的目录（默认 ./models），面板的下拉列表就是扫这里")
+    ap.add_argument("--check-models", action="store_true",
+                    help="只校验模型目录、打印结果然后退出（不启动服务）")
     ap.add_argument("--source", default="sim", choices=["sim", "serial", "replay", "none"],
                     help="启动时自动打开的数据源（none = 等插件发指令）")
     ap.add_argument("--serial-port", default=None, help="串口，如 COM7")
@@ -866,26 +1157,70 @@ def main(argv=None) -> int:
     VERBOSE = bool(args.verbose)
 
     nf = load_neurofocus(args.nf_dir)
-    model_path = args.model or getattr(nf, "MODEL_PATH",
-                                       os.path.join(args.nf_dir, "models", "model.json"))
+    models_dir = os.path.abspath(args.models_dir)
+
+    # --check-models：只体检，不启动。答辩前用它确认模型目录没被搞坏。
+    if args.check_models:
+        rows = scan_models(nf, models_dir)
+        print("=" * 64)
+        print(f"  模型目录 : {models_dir}")
+        print("=" * 64)
+        if not rows:
+            print("  （空）把 model_*.json 放进来就行，文件名就是模型 id")
+        for m in rows:
+            mark = "OK  " if m["ok"] else "拒绝"
+            head = f"  {mark} {m['id']}.json"
+            if m["ok"]:
+                extra = f"{m['params']} 参数 · {m['features']} 维"
+                if m.get("trained_at"):
+                    extra += f" · {m['trained_at']}"
+                print(f"{head}  {extra}")
+            else:
+                print(f"{head}  {m['reason']}")
+        n_ok = sum(1 for m in rows if m["ok"])
+        print("-" * 64)
+        print(f"  共 {len(rows)} 个文件，可用 {n_ok} 个")
+        print("=" * 64)
+        return 0 if (n_ok or not rows) else 1
+
+    model_path = args.model
+    if not model_path:
+        for m in scan_models(nf, models_dir):
+            if m["ok"]:
+                model_path = m["path"]
+                break
+    if not model_path:
+        model_path = getattr(nf, "MODEL_PATH",
+                             os.path.join(args.nf_dir, "models", "model.json"))
     if not os.path.isfile(str(model_path)):
-        raise SystemExit(f"[x] 找不到模型文件: {model_path}")
+        raise SystemExit(f"[x] 找不到模型文件: {model_path}\n"
+                         f"    模型目录: {models_dir}（用 --check-models 看看）")
 
     hub = Hub()
-    engine = Engine(nf, str(model_path), hub)
+    engine = Engine(nf, str(model_path), hub, models_dir=models_dir)
     APP = App(engine, hub)
 
-    srv = Server((args.host, args.http_port), Handler)
+    srv = None
+    try:
+        srv = Server((args.host, args.http_port), Handler)
+    except OSError as e:
+        raise SystemExit(f"[x] 端口 {args.http_port} 绑不上：{e}")
     threading.Thread(target=srv.serve_forever, name="nfh-http", daemon=True).start()
 
     ms = engine.model_summary()
+    n_models = len([m for m in engine.list_models() if m["ok"]])
     print("=" * 64)
     print("  NeuroFocus 注意力热力图 · 本地推理服务")
     print("=" * 64)
-    print(f"  模型      : {os.path.basename(str(model_path))}  "
+    print(f"  模型      : {ms['id']}.json  "
           f"{ms['params']} 参数 · {ms['features']} 维 · {ms['window']} 秒窗")
+    if ms.get("trained_at"):
+        print(f"  训练时间  : {ms['trained_at']}")
     if ms.get("acc") is not None:
         print(f"  验证指标  : acc {ms['acc']:.3f} · F1 {(ms['f1'] or 0):.3f} · AUC {(ms['auc'] or 0):.3f}")
+    thr_note = "已校准" if ms["calibrated"] else "未校准·默认"
+    print(f"  阈值      : {ms['thr']:.2f}（{thr_note}）")
+    print(f"  模型目录  : {models_dir}（可用 {n_models} 个，面板可切）")
     print(f"  监听      : http://{args.host}:{args.http_port}")
     print(f"  事件流    : http://{args.host}:{args.http_port}/events")
     print("-" * 64)

@@ -9,6 +9,9 @@ venv/
 *.csv
 !docs/*.csv
 
+# 阈值落盘目录（每个模型一份，属于运行产物）
+state/
+
 # 操作系统
 .DS_Store
 Thumbs.db

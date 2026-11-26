@@ -20,7 +20,10 @@
       <section class="gauge">
         <div class="gaugeTop">
           <div class="pct"><span id="pct">--</span><small>%</small></div>
-          <div id="verdict" class="verdict">—</div>
+          <div class="verdictWrap">
+            <div id="verdict" class="verdict">—</div>
+            <div id="thrBadge" class="badge">未校准</div>
+          </div>
         </div>
         <div class="bar">
           <div class="fill" id="barFill"></div>
@@ -31,13 +34,29 @@
 
       <section class="ctrl">
         <select id="srcSel" title="数据源">
+          <option value="serial" selected>TGAM 串口</option>
           <option value="sim">模拟数据（演示）</option>
-          <option value="serial">TGAM 串口</option>
         </select>
         <button id="btnStart" class="primary">开始测量</button>
         <button id="btnStop" disabled>停止</button>
         <button id="btnCalib" disabled>校准</button>
       </section>
+
+      <details class="modelBox" id="modelBox" open>
+        <summary>
+          <span class="sumTitle">模型与校准</span>
+          <span id="modelNow" class="tag">—</span>
+        </summary>
+        <div class="bRow">
+          <select id="modelSel" title="当前模型。测量中点不了，要换先停止。"></select>
+          <button id="btnModels" class="tiny" title="重新扫描模型目录">刷新</button>
+        </div>
+        <div id="modelInfo" class="bMeta muted">—</div>
+        <div id="calibInfo" class="bMeta muted">—</div>
+        <div class="calibTrack" id="calibTrack" hidden>
+          <div id="calibFill" class="calibFill"></div>
+        </div>
+      </details>
 
       <section class="ctrl portRow" id="portRow" hidden>
         <input id="portSel" list="portList" placeholder="COM7" autocomplete="off"
@@ -61,6 +80,7 @@
       <section class="matrixHead">
         <span>时间热力图</span>
         <span id="rangeLine" class="muted">—</span>
+        <button id="btnMark" class="tiny" title="标记当前时刻，之后点标签可跳回来重测（快捷键 M）">⚑ 标记</button>
       </section>
 
       <div id="matrixWrap" class="matrixWrap">
