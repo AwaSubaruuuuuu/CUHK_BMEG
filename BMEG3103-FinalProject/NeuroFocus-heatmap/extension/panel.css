@@ -1,0 +1,590 @@
+:root {
+  --bg: #0d1117;
+  --bg2: #11161d;
+  --line: #21262d;
+  --fg: #e6edf3;
+  --muted: #8b949e;
+  --green: #3fb950;
+  --orange: #f0883e;
+  --accent: #15803d;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+}
+
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font: 13px/1.5 "Microsoft YaHei UI", "PingFang SC", system-ui, -apple-system, sans-serif;
+  overflow: hidden;
+}
+
+.wrap {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  padding: 10px 12px 8px;
+  gap: 8px;
+}
+
+/* ---------------- header ---------------- */
+header {
+  flex: 0 0 auto;
+}
+
+.headRow {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.headRow strong {
+  font-size: 13px;
+  letter-spacing: 0.2px;
+}
+
+.dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #6e7681;
+  flex: 0 0 auto;
+}
+
+.dot.on {
+  background: var(--green);
+  box-shadow: 0 0 0 3px rgba(63, 185, 80, 0.18);
+}
+
+.dot.live {
+  background: #f85149;
+  box-shadow: 0 0 0 3px rgba(248, 81, 73, 0.2);
+  animation: blink 1.6s ease-in-out infinite;
+}
+
+@keyframes blink {
+  50% {
+    opacity: 0.35;
+  }
+}
+
+.muted {
+  color: var(--muted);
+}
+
+.videoLine {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 11.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ---------------- gauge ---------------- */
+.gauge {
+  flex: 0 0 auto;
+  background: var(--bg2);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 8px 10px 9px;
+}
+
+.gaugeTop {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+}
+
+.pct {
+  font: 600 30px/1 "Segoe UI", system-ui, sans-serif;
+  letter-spacing: -0.5px;
+}
+
+.pct small {
+  font-size: 13px;
+  color: var(--muted);
+  margin-left: 2px;
+}
+
+.verdict {
+  font-weight: 600;
+  font-size: 12px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(139, 148, 158, 0.14);
+  color: var(--muted);
+}
+
+.verdict.focus {
+  background: rgba(63, 185, 80, 0.15);
+  color: #56d364;
+}
+
+.verdict.rest {
+  background: rgba(240, 136, 62, 0.15);
+  color: var(--orange);
+}
+
+.bar {
+  position: relative;
+  height: 6px;
+  margin: 8px 0 6px;
+  border-radius: 999px;
+  background: #1b222b;
+  overflow: visible;
+}
+
+.bar .fill {
+  height: 100%;
+  width: 0;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #15803d, #4ade80);
+  transition: width 0.25s ease;
+}
+
+.bar .mark {
+  position: absolute;
+  top: -3px;
+  width: 2px;
+  height: 12px;
+  background: #d29922;
+  border-radius: 2px;
+  left: 50%;
+}
+
+.sub {
+  font-size: 11px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ---------------- controls ---------------- */
+.ctrl {
+  flex: 0 0 auto;
+  display: grid;
+  grid-template-columns: 1fr auto auto auto;
+  gap: 6px;
+}
+
+.ctrl.portRow {
+  grid-template-columns: 1fr auto;
+}
+
+/* [hidden] 的 UA 规则打不过 .ctrl 的 display:grid，必须显式关掉 */
+.ctrl[hidden] {
+  display: none;
+}
+
+.ctrl.portRow select,
+.ctrl.portRow input {
+  font-size: 11px;
+  min-width: 0;
+  cursor: text;
+}
+
+.ctrl.portRow button {
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+select,
+input,
+button {
+  font: inherit;
+  font-size: 12px;
+  color: var(--fg);
+  background: #1b222b;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  padding: 5px 8px;
+  cursor: pointer;
+}
+
+select {
+  min-width: 0;
+}
+
+button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+button.primary {
+  background: var(--accent);
+  border-color: #166534;
+  font-weight: 600;
+}
+
+button.primary:hover:not(:disabled) {
+  background: #166534;
+}
+
+/* ---------------- matrix ---------------- */
+.matrixHead {
+  flex: 0 0 auto;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: #c9d1d9;
+}
+
+.matrixHead #rangeLine {
+  margin-left: auto;
+}
+
+.matrixHead button.tiny {
+  flex: 0 0 auto;
+}
+
+.matrixWrap {
+  flex: 1 1 auto;
+  min-height: 90px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  background: var(--bg2);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 8px;
+}
+
+.matrix {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(13px, 1fr));
+  gap: 3px;
+  align-content: start;
+}
+
+.cell {
+  position: relative;
+  aspect-ratio: 1 / 1;
+  border-radius: 2.5px;
+  background: #151b23;
+  cursor: pointer;
+  transition: background 0.25s ease, transform 0.12s ease;
+}
+
+.cell:hover {
+  transform: scale(1.22);
+  outline: 1px solid rgba(255, 255, 255, 0.55);
+  z-index: 2;
+}
+
+.cell.now {
+  outline: 1px solid #58a6ff;
+  outline-offset: 1px;
+}
+
+.cell.multi::after {
+  content: "";
+  position: absolute;
+  top: 1px;
+  right: 1px;
+  width: 3px;
+  height: 3px;  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.85);
+}
+
+.legend {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10.5px;
+}
+
+.legend i {
+  width: 11px;
+  height: 11px;
+  border-radius: 2px;
+  display: inline-block;
+}
+
+.legend .sep {
+  width: 1px;
+  height: 12px;
+  background: var(--line);
+  margin: 0 6px;
+}
+
+/* ---------------- footer ---------------- */
+footer {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.cfgRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 11.5px;
+  color: var(--muted);
+}
+
+.cfgRow select {
+  padding: 3px 6px;
+  font-size: 11.5px;
+}
+
+.lagLabel {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.lagLabel input {
+  width: 84px;
+}
+
+.footRow {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+
+.footRow button {
+  font-size: 11.5px;
+  padding: 4px 6px;
+}
+
+.hint {
+  min-height: 15px;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.hint.warn {
+  color: var(--orange);
+}
+
+.hint.ok {
+  color: #56d364;
+}
+
+/* ---------------- tooltip ---------------- */
+.tip {
+  position: fixed;
+  z-index: 99;
+  pointer-events: none;
+  background: rgba(22, 27, 34, 0.97);
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  padding: 5px 7px;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--fg);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.45);
+  opacity: 0;
+  transition: opacity 0.1s ease;
+  max-width: 220px;
+}
+
+.tip.on {
+  opacity: 1;
+}
+
+/* ---------------- Arduino 桥（方案 C） ---------------- */
+.bridge {
+  flex: 0 0 auto;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  padding: 5px 7px;
+  background: #10161d;
+}
+
+.bridge[hidden] {
+  display: none;
+}
+
+.bRow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
+}
+
+.bName {
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bMeta {
+  font-size: 10.5px;
+  margin-top: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+button.tiny {
+  font-size: 10.5px;
+  padding: 2px 6px;
+  border-radius: 5px;
+}
+
+button.tiny[disabled] {
+  opacity: 0.4;
+}
+
+/* 按键标记 */
+.marks {
+  flex: 0 0 auto;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.marks[hidden] {
+  display: none;
+}
+
+.chip {
+  font-size: 10.5px;
+  padding: 2px 7px;
+  border-radius: 10px;
+  border: 1px solid #6b4a12;
+  background: #2a1d08;
+  color: #f0b357;
+  cursor: pointer;
+}
+
+.chip:hover {
+  background: #3a2809;
+}
+
+/* 含伪迹的格子：加一圈半透明底边，别和「重测过」的白点混 */
+.cell.noisy {
+  box-shadow: inset 0 0 0 1.5px rgba(240, 136, 62, 0.65);
+}
+
+/* ---------------- 模型与校准 ---------------- */
+.verdictWrap {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 3px;
+}
+
+.badge {
+  font-size: 10px;
+  line-height: 1.4;
+  padding: 1px 6px;
+  border-radius: 999px;
+  border: 1px solid #4a3410;
+  background: #2a1d08;
+  color: #f0b357;
+  white-space: nowrap;
+}
+
+.badge.calib {
+  border-color: #1f4a2a;
+  background: #0f2417;
+  color: #56d364;
+}
+
+.modelBox {
+  flex: 0 0 auto;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: #10161d;
+  padding: 4px 7px 6px;
+}
+
+.modelBox > summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  font-size: 11.5px;
+  color: #c9d1d9;
+  list-style: none;
+}
+
+.modelBox > summary::-webkit-details-marker {
+  display: none;
+}
+
+.modelBox > summary::before {
+  content: "▸";
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.modelBox[open] > summary::before {
+  content: "▾";
+}
+
+.modelBox .sumTitle {
+  flex: 0 0 auto;
+}
+
+.modelBox .tag {
+  margin-left: auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 10.5px;
+  color: var(--muted);
+}
+
+.modelBox .bRow {
+  margin-top: 5px;
+}
+
+.modelBox select {
+  flex: 1 1 auto;
+  font-size: 11px;
+  padding: 3px 6px;
+}
+
+.modelBox option:disabled {
+  color: #6e7681;
+}
+
+.modelBox .bMeta {
+  font-size: 10.5px;
+}
+
+.calibTrack {
+  height: 3px;
+  margin-top: 4px;
+  border-radius: 999px;
+  background: #1b222b;
+  overflow: hidden;
+}
+
+.calibTrack[hidden] {
+  display: none;
+}
+
+.calibFill {
+  height: 100%;
+  width: 0;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #15803d, #4ade80);
+  transition: width 0.3s linear;
+}
+
+/* Arduino 桥的界面先收起来：现在走蓝牙 SPP，Windows 只看到 COMx，
+   串口那一行已经够用。桥的代码（server.py / 固件 / tools）全部保留，
+   要恢复就把下面这条删掉。 */
+#bridgeBar {
+  display: none;
+}

@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# 本地跑出来的临时文件
+*.log
+*.csv
+!docs/*.csv
+
+# 阈值落盘目录（每个模型一份，属于运行产物）
+state/
+
+# 操作系统
+.DS_Store
+Thumbs.db
+desktop.ini
